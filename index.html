@@ -53,11 +53,9 @@
             // 2. Prepare Tasks
             let tasks = [];
             workload.forEach(w => {
-                // If it's a fixed class with specific day/period
                 if (w.fixedDay !== undefined && w.fixedDay !== "" && w.fixedPeriod) {
                     tasks.push({ ...w, uniqueId: generateId(), isFixed: true });
                 } else {
-                    // Flexible classes
                     for (let i = 0; i < w.hoursPerWeek; i++) {
                         tasks.push({ ...w, uniqueId: generateId(), isFixed: false });
                     }
@@ -73,27 +71,24 @@
             });
 
             const isValid = (task, day, period, currentSchedule) => {
-                // Rule 1: Room Check (Must be null. If BLOCKED or Occupied, fail)
+                // Rule 1: Room Check
                 if (currentSchedule[task.classId][day][period] !== null) return false;
 
                 // Rule 2: Teacher Conflict
                 for (const cls of classes) {
                     const slot = currentSchedule[cls.id][day][period];
-                    // Skip if slot is empty or just a generic block
                     if (!slot || slot.type === 'BLOCKED') continue;
 
-                    // Conflict with Primary Teacher
                     if (slot.teacherId === task.teacherId || slot.assistantId === task.teacherId) return false;
-                    // Conflict with Assistant
                     if (task.assistantId) {
                         if (slot.teacherId === task.assistantId || slot.assistantId === task.assistantId) return false;
                     }
-                    // Edge case: Current slot assistant is our primary
                     if (slot.assistantId === task.teacherId) return false;
                 }
 
-                // Rule 3: Constraints (Only check for flexible tasks)
+                // Rule 3: Soft Constraints (Only check for flexible tasks)
                 if (!task.isFixed) {
+                    // Max Consecutive
                     if (constraints.maxConsecutive && period > constraints.maxConsecutive) {
                         let consecutiveCount = 0;
                         for (let p = period - 1; p >= 1; p--) {
@@ -111,6 +106,7 @@
                         if (consecutiveCount >= constraints.maxConsecutive) return false;
                     }
 
+                    // Max Daily Hours
                     if (constraints.maxDailyHours) {
                         let dailyCount = 0;
                         for(let p = 1; p <= PERIODS; p++) {
@@ -124,7 +120,6 @@
                         if (dailyCount >= constraints.maxDailyHours) return false;
                     }
                 }
-
                 return true;
             };
 
@@ -132,21 +127,42 @@
                 if (taskIndex >= tasks.length) return true;
                 const task = tasks[taskIndex];
                 
-                // If Fixed Task: Only try the specific slot
+                // FIXED TASKS: Only 1 specific slot
                 if (task.isFixed) {
                     const d = parseInt(task.fixedDay);
                     const p = parseInt(task.fixedPeriod);
-                    
                     if (isValid(task, d, p, schedule)) {
                         schedule[task.classId][d][p] = task;
                         if (solve(taskIndex + 1)) return true;
                         schedule[task.classId][d][p] = null;
                     }
-                    return false; // Could not place fixed task
+                    return false;
                 }
 
-                // Flexible Task: Try all slots
-                for (let day = 0; day < DAYS; day++) {
+                // FLEXIBLE TASKS: Heuristic Day Ordering
+                let daysToTry = [0, 1, 2, 3, 4];
+
+                // If "Ensure All Days Engaged" is ON, sort days by current teacher load
+                // We prioritize days where the teacher has the LEAST classes so far.
+                if (constraints.ensureAllDaysEngaged) {
+                    const teacherLoadPerDay = daysToTry.map(d => {
+                        let count = 0;
+                        for(const cls of classes) {
+                            for(let p = 1; p <= PERIODS; p++) {
+                                const s = schedule[cls.id][d][p];
+                                if (s && s.type !== 'BLOCKED' && (s.teacherId === task.teacherId || s.assistantId === task.teacherId)) {
+                                    count++;
+                                }
+                            }
+                        }
+                        return { day: d, count };
+                    });
+                    // Sort ascending: Days with 0 load first
+                    daysToTry = teacherLoadPerDay.sort((a,b) => a.count - b.count).map(x => x.day);
+                }
+
+                // Try Sorted Days
+                for (let day of daysToTry) {
                     for (let period = 1; period <= PERIODS; period++) {
                         if (isValid(task, day, period, schedule)) {
                             schedule[task.classId][day][period] = task;
@@ -159,7 +175,7 @@
             };
 
             if (solve(0)) return schedule;
-            throw new Error("Conflict found! Likely due to Fixed Classes overlapping or insufficient slots.");
+            throw new Error("Conflict found! Constraints too strict or insufficient slots.");
         };
 
         // --- APP COMPONENT ---
@@ -174,12 +190,16 @@
             const [classes, setClasses] = useState([{ id: 1, name: 'BSc Botany S6', short: 'S6', unavailable: [] }]);
             const [subjects, setSubjects] = useState([{ id: 1, name: 'Genetics', code: 'BOT101' }]);
             const [workload, setWorkload] = useState([]);
-            const [constraints, setConstraints] = useState({ maxConsecutive: 2, maxDailyHours: 4 });
+            const [constraints, setConstraints] = useState({ 
+                maxConsecutive: 2, 
+                maxDailyHours: 4, 
+                ensureAllDaysEngaged: true // Default true
+            });
             const [finalSchedule, setFinalSchedule] = useState(null);
 
             // Load Data
             useEffect(() => {
-                const savedData = localStorage.getItem('timetable_builder_v2');
+                const savedData = localStorage.getItem('timetable_builder_v3');
                 if (savedData) {
                     try {
                         const parsed = JSON.parse(savedData);
@@ -197,7 +217,7 @@
             useEffect(() => {
                 const timeoutId = setTimeout(() => {
                     const data = { faculty, classes, subjects, workload, constraints };
-                    localStorage.setItem('timetable_builder_v2', JSON.stringify(data));
+                    localStorage.setItem('timetable_builder_v3', JSON.stringify(data));
                     setSaveStatus('Saved');
                     setTimeout(() => setSaveStatus(''), 2000);
                 }, 500);
@@ -256,21 +276,17 @@
             const EntitiesTab = () => {
                 const [classForm, setClassForm] = useState({ name: '', short: '' });
                 const [subForm, setSubForm] = useState({ name: '', code: '' });
-                
-                // Managing Availability State
                 const [managingClass, setManagingClass] = useState(null);
 
                 const toggleSlot = (cls, day, period) => {
                     const key = `${day}-${period}`;
                     const currentUnavailable = cls.unavailable || [];
                     let newUnavailable;
-                    
                     if (currentUnavailable.includes(key)) {
                         newUnavailable = currentUnavailable.filter(k => k !== key);
                     } else {
                         newUnavailable = [...currentUnavailable, key];
                     }
-                    
                     setClasses(classes.map(c => c.id === cls.id ? { ...c, unavailable: newUnavailable } : c));
                 };
 
@@ -296,28 +312,17 @@
                                                     <button onClick={()=>setClasses(classes.filter(x=>x.id!==c.id))} className="text-red-500"><Icon name="trash-2" className="w-4 h-4" /></button>
                                                 </div>
                                             </div>
-                                            {/* Availability Grid */}
                                             {managingClass === c.id && (
                                                 <div className="mt-3 bg-slate-50 p-3 rounded border">
                                                     <p className="text-xs text-slate-500 mb-2">Click slots to mark as <span className="text-red-500 font-bold">Unavailable</span></p>
                                                     <div className="grid grid-cols-6 gap-1 text-center text-xs">
-                                                        <div className="font-bold">Day</div>
-                                                        {[1,2,3,4,5].map(p => <div key={p} className="font-bold">P{p}</div>)}
-                                                        
+                                                        <div className="font-bold">Day</div>{[1,2,3,4,5].map(p => <div key={p} className="font-bold">P{p}</div>)}
                                                         {["Mon","Tue","Wed","Thu","Fri"].map((day, dIdx) => (
                                                             <React.Fragment key={day}>
                                                                 <div className="font-bold text-left pl-1 self-center">{day}</div>
                                                                 {[1,2,3,4,5].map(p => {
                                                                     const isBlocked = (c.unavailable || []).includes(`${dIdx}-${p}`);
-                                                                    return (
-                                                                        <div 
-                                                                            key={p} 
-                                                                            onClick={() => toggleSlot(c, dIdx, p)}
-                                                                            className={`cursor-pointer p-2 rounded border transition-colors ${isBlocked ? 'bg-red-500 text-white border-red-600' : 'bg-white hover:bg-green-100 border-slate-200'}`}
-                                                                        >
-                                                                            {isBlocked ? 'X' : ''}
-                                                                        </div>
-                                                                    );
+                                                                    return <div key={p} onClick={() => toggleSlot(c, dIdx, p)} className={`cursor-pointer p-2 rounded border ${isBlocked ? 'bg-red-500 text-white border-red-600' : 'bg-white hover:bg-green-100 border-slate-200'}`}>{isBlocked ? 'X' : ''}</div>;
                                                                 })}
                                                             </React.Fragment>
                                                         ))}
@@ -329,7 +334,6 @@
                                 </ul>
                             </div>
                         </div>
-                        
                         <div className="space-y-4">
                             <div className="bg-white p-6 rounded shadow border">
                                 <h3 className="font-bold mb-4 flex gap-2"><Icon name="book-open" /> Subjects</h3>
@@ -362,7 +366,7 @@
                         subjectId: parseInt(form.subId),
                         teacherId: parseInt(form.teachId),
                         assistantId: form.hasAsst ? parseInt(form.asstId) : null,
-                        hoursPerWeek: form.isLocked ? 1 : parseInt(form.hours), // Fixed classes are always 1 slot per entry
+                        hoursPerWeek: form.isLocked ? 1 : parseInt(form.hours),
                         type: form.hasAsst ? 'Joint' : 'Normal',
                         fixedDay: form.isLocked ? form.lockedDay : undefined,
                         fixedPeriod: form.isLocked ? form.lockedPeriod : undefined
@@ -405,7 +409,6 @@
                                 </div>
                             </div>
                             
-                            {/* Locked Option */}
                             <div className="bg-yellow-50 p-3 rounded border border-yellow-200 flex flex-wrap gap-4 items-center mb-4">
                                 <div className="flex items-center gap-2">
                                     <input type="checkbox" id="lockCheck" checked={form.isLocked} onChange={e=>setForm({...form, isLocked:e.target.checked, hours:1})} className="w-4 h-4 text-blue-600 rounded"/>
@@ -419,7 +422,6 @@
                                         <select className="border p-1 rounded text-sm" value={form.lockedPeriod} onChange={e=>setForm({...form, lockedPeriod:e.target.value})}>
                                             <option value="1">Period 1</option><option value="2">Period 2</option><option value="3">Period 3</option><option value="4">Period 4</option><option value="5">Period 5</option>
                                         </select>
-                                        <span className="text-xs text-yellow-700">(Fixed classes count as 1 Hour)</span>
                                     </>
                                 )}
                             </div>
@@ -462,17 +464,34 @@
             };
 
             const ConstraintsTab = () => (
-                <div className="bg-white p-6 rounded shadow border">
-                    <h3 className="font-bold mb-4 flex gap-2"><Icon name="settings" /> Constraints</h3>
-                    <div className="grid grid-cols-2 gap-4">
-                        <div>
-                            <label className="block text-sm font-bold mb-1">Max Consecutive Hours</label>
-                            <input type="number" className="border p-2 rounded w-full" value={constraints.maxConsecutive} onChange={e=>setConstraints({...constraints, maxConsecutive: parseInt(e.target.value)})} />
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="bg-white p-6 rounded shadow border">
+                        <h3 className="font-bold mb-4 flex gap-2"><Icon name="settings" /> Constraints</h3>
+                        <div className="space-y-4">
+                            <div>
+                                <label className="block text-sm font-bold mb-1">Max Consecutive Hours</label>
+                                <input type="number" className="border p-2 rounded w-full" value={constraints.maxConsecutive} onChange={e=>setConstraints({...constraints, maxConsecutive: parseInt(e.target.value)})} />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-bold mb-1">Max Daily Hours per Faculty</label>
+                                <input type="number" className="border p-2 rounded w-full" value={constraints.maxDailyHours} onChange={e=>setConstraints({...constraints, maxDailyHours: parseInt(e.target.value)})} />
+                            </div>
+                            <div className="flex items-center gap-2 pt-2">
+                                <input type="checkbox" id="allDays" checked={constraints.ensureAllDaysEngaged} onChange={e=>setConstraints({...constraints, ensureAllDaysEngaged:e.target.checked})} className="w-5 h-5 text-blue-600 rounded"/>
+                                <label htmlFor="allDays" className="text-sm font-bold text-slate-700">Ensure Faculty has engagement every day</label>
+                            </div>
+                            <p className="text-xs text-gray-500">Note: "Every day" uses a smart sorting heuristic. If total workload is small, this may not be mathematically possible.</p>
                         </div>
-                        <div>
-                            <label className="block text-sm font-bold mb-1">Max Daily Hours per Faculty</label>
-                            <input type="number" className="border p-2 rounded w-full" value={constraints.maxDailyHours} onChange={e=>setConstraints({...constraints, maxDailyHours: parseInt(e.target.value)})} />
-                        </div>
+                    </div>
+                    
+                    <div className="bg-blue-50 p-6 rounded border border-blue-100">
+                        <h3 className="font-bold mb-4 text-blue-800">Logic Info</h3>
+                        <ul className="list-disc list-inside text-sm text-blue-700 space-y-2">
+                            <li>Teachers cannot be in two places at once.</li>
+                            <li>Classes cannot have two subjects at once.</li>
+                            <li>Fixed classes (Yellow) are placed first.</li>
+                            <li>Unavailable slots (Red) are skipped.</li>
+                        </ul>
                     </div>
                 </div>
             );
@@ -497,10 +516,7 @@
                                                     <td className="border p-2 font-bold bg-gray-50">{day}</td>
                                                     {[1,2,3,4,5].map(p => {
                                                         const slot = finalSchedule[cls.id][dIdx][p];
-                                                        // Check for Blocked slots
-                                                        if(slot && slot.type === 'BLOCKED') {
-                                                            return <td key={p} className="border p-2 bg-red-50 text-red-300 font-mono text-xs">N/A</td>;
-                                                        }
+                                                        if(slot && slot.type === 'BLOCKED') return <td key={p} className="border p-2 bg-red-50 text-red-300 text-xs">N/A</td>;
                                                         if(!slot) return <td key={p} className="border p-2 text-gray-300">-</td>;
                                                         
                                                         const sub = subjects.find(x=>x.id===slot.subjectId);
