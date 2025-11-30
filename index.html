@@ -18,16 +18,16 @@
     <!-- 4. Load Icons (Lucide) -->
     <script src="https://unpkg.com/lucide@latest"></script>
 </head>
-<body class="bg-gray-50">
+<body class="bg-gray-50 text-slate-800">
     <div id="root"></div>
 
     <!-- MAIN SCRIPT -->
     <script type="text/babel">
-        const { useState, useEffect } = React;
+        const { useState, useEffect, useRef } = React;
         const { createRoot } = ReactDOM;
         
-        // --- ICONS WRAPPER (Since we are using CDN icons) ---
-        const Icon = ({ name, className }) => <i data-lucide={name} className={className}></i>;
+        // --- ICONS WRAPPER ---
+        const Icon = ({ name, className, onClick }) => <i data-lucide={name} className={className} onClick={onClick}></i>;
 
         // --- LOGIC ENGINE (Backtracking Algorithm) ---
         const generateId = () => Math.floor(Math.random() * 100000);
@@ -48,36 +48,44 @@
                 }
             });
 
+            // Sort: Joint classes first, then by total load desc
             tasks.sort((a, b) => {
                 if (a.type === 'Joint' && b.type !== 'Joint') return -1;
                 return 0;
             });
 
             const isValid = (task, day, period, currentSchedule) => {
+                // 1. Room Check
                 if (currentSchedule[task.classId][day][period] !== null) return false;
 
+                // 2. Teacher Check (Iterate all classes to see if teacher is busy)
                 for (const cls of classes) {
                     const slot = currentSchedule[cls.id][day][period];
                     if (slot) {
+                        // Conflict with Primary Teacher
                         if (slot.teacherId === task.teacherId || slot.assistantId === task.teacherId) return false;
+                        // Conflict with Assistant Teacher
                         if (task.assistantId) {
                             if (slot.teacherId === task.assistantId || slot.assistantId === task.assistantId) return false;
                         }
+                        // Edge case: Current slot's assistant is our primary
+                        if (slot.assistantId === task.teacherId) return false;
                     }
                 }
 
+                // 3. Constraints Check
                 if (constraints.maxConsecutive && period > constraints.maxConsecutive) {
                     let consecutiveCount = 0;
                     for (let p = period - 1; p >= 1; p--) {
-                        let isTeacherBusyInThisSlot = false;
+                        let isBusy = false;
                         for (const cls of classes) {
                             const slot = currentSchedule[cls.id][day][p];
                             if (slot && (slot.teacherId === task.teacherId || slot.assistantId === task.teacherId)) {
-                                isTeacherBusyInThisSlot = true;
+                                isBusy = true;
                                 break;
                             }
                         }
-                        if (isTeacherBusyInThisSlot) consecutiveCount++;
+                        if (isBusy) consecutiveCount++;
                         else break;
                     }
                     if (consecutiveCount >= constraints.maxConsecutive) return false;
@@ -102,33 +110,27 @@
             };
 
             if (solve(0)) return schedule;
-            throw new Error("Conflict found! Could not generate timetable.");
+            throw new Error("Conflict found! Could not generate timetable. Try relaxing constraints or reducing workload.");
         };
 
-        // --- APP COMPONENT ---
+        // --- MAIN APP COMPONENT ---
         const TimetableApp = () => {
             const [activeTab, setActiveTab] = useState('faculty');
             const [isGenerating, setIsGenerating] = useState(false);
             const [generationError, setGenerationError] = useState(null);
+            const [saveStatus, setSaveStatus] = useState('');
             
-            // --- INITIAL DATA ---
+            // --- DATA STATE ---
             const [faculty, setFaculty] = useState([
                 { id: 1, name: 'Suresh V', short: 'SV', color: '#ffebee' },
-                { id: 2, name: 'Sojan Jose', short: 'SJ', color: '#e0f7ff' },
-                { id: 3, name: 'Rasmi AR', short: 'ARR', color: '#e8f5e9' }
+                { id: 2, name: 'Sojan Jose', short: 'SJ', color: '#e0f7ff' }
             ]);
-
             const [classes, setClasses] = useState([
-                { id: 1, name: 'BSc Botany S6', short: 'S6' },
-                { id: 2, name: 'MSc Botany S2', short: 'PG2' }
+                { id: 1, name: 'BSc Botany S6', short: 'S6' }
             ]);
-
             const [subjects, setSubjects] = useState([
-                { id: 1, name: 'Genetics', code: 'BOT101' },
-                { id: 2, name: 'Plant Physiology', code: 'BOT102' },
-                { id: 3, name: 'Practical Lab 1', code: 'LAB1' }
+                { id: 1, name: 'Genetics', code: 'BOT101' }
             ]);
-
             const [workload, setWorkload] = useState([]);
             const [constraints, setConstraints] = useState({
                 maxConsecutive: 2,
@@ -136,10 +138,9 @@
                 forceFreeHourAfterConsecutive: true,
                 ensureAllDaysEngaged: true
             });
-
             const [finalSchedule, setFinalSchedule] = useState(null);
 
-            // Load Data
+            // --- LOAD INITIAL DATA ---
             useEffect(() => {
                 const savedData = localStorage.getItem('timetable_builder_data');
                 if (savedData) {
@@ -152,20 +153,24 @@
                         if(parsed.constraints) setConstraints(parsed.constraints);
                     } catch (e) { console.error(e); }
                 }
-                // Initialize Lucide icons
                 if(window.lucide) window.lucide.createIcons();
             }, []);
 
-            // Re-run icons when tab changes
+            // --- AUTO SAVE ---
+            useEffect(() => {
+                const timeoutId = setTimeout(() => {
+                    const data = { faculty, classes, subjects, workload, constraints };
+                    localStorage.setItem('timetable_builder_data', JSON.stringify(data));
+                    setSaveStatus('Saved');
+                    setTimeout(() => setSaveStatus(''), 2000);
+                }, 500);
+                return () => clearTimeout(timeoutId);
+            }, [faculty, classes, subjects, workload, constraints]);
+
+            // Re-render icons on updates
             useEffect(() => {
                 if(window.lucide) window.lucide.createIcons();
-            }, [activeTab, finalSchedule]);
-
-            const saveData = () => {
-                const data = { faculty, classes, subjects, workload, constraints };
-                localStorage.setItem('timetable_builder_data', JSON.stringify(data));
-                alert('Data saved successfully!');
-            };
+            });
 
             const handleGenerate = () => {
                 setIsGenerating(true);
@@ -184,30 +189,60 @@
                 }, 100);
             };
 
-            // --- TABS UI ---
+            // --- SUB-COMPONENTS ---
+
             const FacultyTab = () => {
-                const [newName, setNewName] = useState('');
-                const [newShort, setNewShort] = useState('');
-                const add = () => {
-                    if(!newName) return;
-                    setFaculty([...faculty, { id: Date.now(), name: newName, short: newShort, color: '#f3f4f6' }]);
-                    setNewName(''); setNewShort('');
+                const [form, setForm] = useState({ name: '', short: '' });
+                const [editId, setEditId] = useState(null);
+
+                const handleSubmit = () => {
+                    if(!form.name) return;
+                    
+                    if (editId) {
+                        // Update existing
+                        setFaculty(faculty.map(f => f.id === editId ? { ...f, ...form } : f));
+                        setEditId(null);
+                    } else {
+                        // Create new
+                        setFaculty([...faculty, { id: Date.now(), ...form, color: '#f3f4f6' }]);
+                    }
+                    setForm({ name: '', short: '' });
                 };
+
+                const startEdit = (f) => {
+                    setForm({ name: f.name, short: f.short });
+                    setEditId(f.id);
+                };
+
                 return (
                     <div className="space-y-6">
-                        <div className="bg-white p-6 rounded shadow border">
-                            <h3 className="font-bold mb-4 flex gap-2"><Icon name="users" /> Add Faculty</h3>
-                            <div className="flex gap-2">
-                                <input className="border p-2 rounded flex-1" placeholder="Name" value={newName} onChange={e=>setNewName(e.target.value)} />
-                                <input className="border p-2 rounded w-24" placeholder="Abbr" value={newShort} onChange={e=>setNewShort(e.target.value)} />
-                                <button onClick={add} className="bg-blue-600 text-white px-4 rounded">Add</button>
+                        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+                            <h3 className="font-bold mb-4 flex items-center gap-2 text-blue-800">
+                                <Icon name={editId ? "pencil" : "plus"} className="w-5 h-5" /> 
+                                {editId ? "Edit Faculty" : "Add Faculty"}
+                            </h3>
+                            <div className="flex flex-col md:flex-row gap-2">
+                                <input className="border p-2 rounded flex-1 focus:ring-2 focus:ring-blue-200 outline-none" placeholder="Full Name" value={form.name} onChange={e=>setForm({...form, name:e.target.value})} />
+                                <input className="border p-2 rounded w-full md:w-32 focus:ring-2 focus:ring-blue-200 outline-none" placeholder="Abbr (SV)" value={form.short} onChange={e=>setForm({...form, short:e.target.value})} />
+                                <div className="flex gap-2">
+                                    <button onClick={handleSubmit} className={`${editId ? 'bg-orange-500 hover:bg-orange-600' : 'bg-blue-600 hover:bg-blue-700'} text-white px-6 rounded font-medium transition-colors`}>
+                                        {editId ? "Update" : "Add"}
+                                    </button>
+                                    {editId && <button onClick={() => {setEditId(null); setForm({name:'', short:''})}} className="text-gray-500 hover:bg-gray-100 px-3 rounded">Cancel</button>}
+                                </div>
                             </div>
                         </div>
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                             {faculty.map(f => (
-                                <div key={f.id} className="bg-white p-4 rounded shadow border flex justify-between">
-                                    <div><p className="font-bold">{f.name}</p><span className="text-xs bg-gray-100 px-2 py-1 rounded">{f.short}</span></div>
-                                    <button onClick={()=>setFaculty(faculty.filter(x=>x.id!==f.id))} className="text-red-500"><Icon name="trash-2" /></button>
+                                <div key={f.id} className={`p-4 rounded-lg shadow-sm border flex justify-between items-center transition-all ${editId === f.id ? 'ring-2 ring-orange-400 bg-orange-50' : 'bg-white hover:shadow-md'}`}>
+                                    <div>
+                                        <p className="font-bold text-gray-800">{f.name}</p>
+                                        <span className="text-xs bg-blue-50 text-blue-700 border border-blue-100 px-2 py-1 rounded mt-1 inline-block">{f.short}</span>
+                                    </div>
+                                    <div className="flex gap-1">
+                                        <button onClick={()=>startEdit(f)} className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded"><Icon name="pencil" className="w-4 h-4" /></button>
+                                        <button onClick={()=>setFaculty(faculty.filter(x=>x.id!==f.id))} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded"><Icon name="trash-2" className="w-4 h-4" /></button>
+                                    </div>
                                 </div>
                             ))}
                         </div>
@@ -216,35 +251,84 @@
             };
 
             const EntitiesTab = () => {
-                const [newClass, setNewClass] = useState({name:'', short:''});
-                const [newSub, setNewSub] = useState({name:'', code:''});
+                // Class State
+                const [classForm, setClassForm] = useState({ name: '', short: '' });
+                const [editClassId, setEditClassId] = useState(null);
+                
+                // Subject State
+                const [subForm, setSubForm] = useState({ name: '', code: '' });
+                const [editSubId, setEditSubId] = useState(null);
+
+                const handleClassSubmit = () => {
+                    if(!classForm.name) return;
+                    if(editClassId) {
+                        setClasses(classes.map(c => c.id === editClassId ? {...c, ...classForm} : c));
+                        setEditClassId(null);
+                    } else {
+                        setClasses([...classes, {id: Date.now(), ...classForm}]);
+                    }
+                    setClassForm({name:'', short:''});
+                };
+
+                const handleSubSubmit = () => {
+                    if(!subForm.name) return;
+                    if(editSubId) {
+                        setSubjects(subjects.map(s => s.id === editSubId ? {...s, ...subForm} : s));
+                        setEditSubId(null);
+                    } else {
+                        setSubjects([...subjects, {id: Date.now(), ...subForm}]);
+                    }
+                    setSubForm({name:'', code:''});
+                };
+
                 return (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                        {/* Classes */}
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                        {/* Classes Section */}
                         <div className="space-y-4">
-                            <div className="bg-white p-6 rounded shadow border">
-                                <h3 className="font-bold mb-4 flex gap-2"><Icon name="graduation-cap" /> Classes</h3>
+                            <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+                                <h3 className="font-bold mb-4 flex items-center gap-2 text-blue-800"><Icon name="graduation-cap" className="w-5 h-5"/> Classes</h3>
                                 <div className="flex gap-2 mb-2">
-                                    <input className="border p-2 rounded flex-1" placeholder="Class Name" value={newClass.name} onChange={e=>setNewClass({...newClass, name:e.target.value})} />
-                                    <input className="border p-2 rounded w-24" placeholder="Short" value={newClass.short} onChange={e=>setNewClass({...newClass, short:e.target.value})} />
-                                    <button onClick={()=>{setClasses([...classes, {id:Date.now(), ...newClass}]); setNewClass({name:'', short:''})}} className="bg-blue-600 text-white px-3 rounded">+</button>
+                                    <input className="border p-2 rounded flex-1 focus:ring-2 focus:ring-blue-100 outline-none" placeholder="Class Name" value={classForm.name} onChange={e=>setClassForm({...classForm, name:e.target.value})} />
+                                    <input className="border p-2 rounded w-24 focus:ring-2 focus:ring-blue-100 outline-none" placeholder="Short" value={classForm.short} onChange={e=>setClassForm({...classForm, short:e.target.value})} />
+                                    <button onClick={handleClassSubmit} className={`px-4 rounded text-white ${editClassId ? 'bg-orange-500' : 'bg-blue-600'}`}>{editClassId ? <Icon name="check" className="w-4 h-4" /> : <Icon name="plus" className="w-4 h-4" />}</button>
                                 </div>
-                                <ul className="divide-y">
-                                    {classes.map(c=>(<li key={c.id} className="py-2 flex justify-between"><span>{c.name}</span><button onClick={()=>setClasses(classes.filter(x=>x.id!==c.id))} className="text-red-500"><Icon name="trash-2" /></button></li>))}
+                                {editClassId && <button onClick={()=>{setEditClassId(null); setClassForm({name:'', short:''})}} className="text-xs text-gray-500 underline mb-2">Cancel Edit</button>}
+                                
+                                <ul className="divide-y border rounded bg-gray-50">
+                                    {classes.map(c=>(
+                                        <li key={c.id} className={`p-3 flex justify-between items-center ${editClassId===c.id ? 'bg-orange-50' : ''}`}>
+                                            <span className="font-medium">{c.name} <span className="text-gray-400 font-normal">({c.short})</span></span>
+                                            <div className="flex gap-1">
+                                                <button onClick={()=>{setEditClassId(c.id); setClassForm({name:c.name, short:c.short})}} className="text-gray-400 hover:text-blue-600 p-1"><Icon name="pencil" className="w-4 h-4"/></button>
+                                                <button onClick={()=>setClasses(classes.filter(x=>x.id!==c.id))} className="text-gray-400 hover:text-red-500 p-1"><Icon name="trash-2" className="w-4 h-4"/></button>
+                                            </div>
+                                        </li>
+                                    ))}
                                 </ul>
                             </div>
                         </div>
-                        {/* Subjects */}
+
+                        {/* Subjects Section */}
                         <div className="space-y-4">
-                            <div className="bg-white p-6 rounded shadow border">
-                                <h3 className="font-bold mb-4 flex gap-2"><Icon name="book-open" /> Subjects</h3>
+                            <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+                                <h3 className="font-bold mb-4 flex items-center gap-2 text-blue-800"><Icon name="book-open" className="w-5 h-5"/> Subjects</h3>
                                 <div className="flex gap-2 mb-2">
-                                    <input className="border p-2 rounded flex-1" placeholder="Subject Name" value={newSub.name} onChange={e=>setNewSub({...newSub, name:e.target.value})} />
-                                    <input className="border p-2 rounded w-24" placeholder="Code" value={newSub.code} onChange={e=>setNewSub({...newSub, code:e.target.value})} />
-                                    <button onClick={()=>{setSubjects([...subjects, {id:Date.now(), ...newSub}]); setNewSub({name:'', code:''})}} className="bg-blue-600 text-white px-3 rounded">+</button>
+                                    <input className="border p-2 rounded flex-1 focus:ring-2 focus:ring-blue-100 outline-none" placeholder="Subject Name" value={subForm.name} onChange={e=>setSubForm({...subForm, name:e.target.value})} />
+                                    <input className="border p-2 rounded w-24 focus:ring-2 focus:ring-blue-100 outline-none" placeholder="Code" value={subForm.code} onChange={e=>setSubForm({...subForm, code:e.target.value})} />
+                                    <button onClick={handleSubSubmit} className={`px-4 rounded text-white ${editSubId ? 'bg-orange-500' : 'bg-blue-600'}`}>{editSubId ? <Icon name="check" className="w-4 h-4" /> : <Icon name="plus" className="w-4 h-4" />}</button>
                                 </div>
-                                <ul className="divide-y max-h-64 overflow-auto">
-                                    {subjects.map(s=>(<li key={s.id} className="py-2 flex justify-between"><span>{s.name}</span><button onClick={()=>setSubjects(subjects.filter(x=>x.id!==s.id))} className="text-red-500"><Icon name="trash-2" /></button></li>))}
+                                {editSubId && <button onClick={()=>{setEditSubId(null); setSubForm({name:'', code:''})}} className="text-xs text-gray-500 underline mb-2">Cancel Edit</button>}
+
+                                <ul className="divide-y border rounded bg-gray-50 max-h-96 overflow-y-auto">
+                                    {subjects.map(s=>(
+                                        <li key={s.id} className={`p-3 flex justify-between items-center ${editSubId===s.id ? 'bg-orange-50' : ''}`}>
+                                            <span className="font-medium">{s.name} <span className="text-gray-400 font-normal">({s.code})</span></span>
+                                            <div className="flex gap-1">
+                                                <button onClick={()=>{setEditSubId(s.id); setSubForm({name:s.name, code:s.code})}} className="text-gray-400 hover:text-blue-600 p-1"><Icon name="pencil" className="w-4 h-4"/></button>
+                                                <button onClick={()=>setSubjects(subjects.filter(x=>x.id!==s.id))} className="text-gray-400 hover:text-red-500 p-1"><Icon name="trash-2" className="w-4 h-4"/></button>
+                                            </div>
+                                        </li>
+                                    ))}
                                 </ul>
                             </div>
                         </div>
@@ -255,73 +339,128 @@
             const WorkloadTab = () => {
                 const [selClass, setSelClass] = useState(classes[0]?.id || '');
                 const [form, setForm] = useState({ subId: '', teachId: '', asstId: '', hasAsst: false, hours: 1 });
+                const [editId, setEditId] = useState(null);
                 
-                const add = () => {
+                const handleSubmit = () => {
                     if(!selClass || !form.subId || !form.teachId) return;
-                    setWorkload([...workload, {
-                        id: Date.now(),
+                    
+                    const payload = {
                         classId: parseInt(selClass),
                         subjectId: parseInt(form.subId),
                         teacherId: parseInt(form.teachId),
                         assistantId: form.hasAsst ? parseInt(form.asstId) : null,
                         hoursPerWeek: parseInt(form.hours),
                         type: form.hasAsst ? 'Joint' : 'Normal'
-                    }]);
+                    };
+
+                    if (editId) {
+                        setWorkload(workload.map(w => w.id === editId ? { ...w, ...payload } : w));
+                        setEditId(null);
+                    } else {
+                        setWorkload([...workload, { id: Date.now(), ...payload }]);
+                    }
+                    // Reset form partially
+                    setForm({ ...form, subId: '', hours: 1 }); 
                 };
+
+                const startEdit = (w) => {
+                    setEditId(w.id);
+                    // Ensure we switch the view to the class of the item being edited
+                    setSelClass(w.classId);
+                    setForm({
+                        subId: w.subjectId,
+                        teachId: w.teacherId,
+                        asstId: w.assistantId || '',
+                        hasAsst: !!w.assistantId,
+                        hours: w.hoursPerWeek
+                    });
+                };
+
                 const classWork = workload.filter(w => w.classId == selClass);
                 
                 return (
                     <div className="space-y-6">
-                        <div className="bg-blue-50 p-4 rounded border flex justify-between items-center">
-                            <div className="flex gap-2 items-center">
-                                <span className="font-bold">Select Class:</span>
-                                <select className="border p-2 rounded" value={selClass} onChange={e=>setSelClass(e.target.value)}>
+                        {/* Selector Header */}
+                        <div className="bg-blue-50 p-4 rounded-lg border border-blue-100 flex flex-col md:flex-row justify-between items-center gap-4">
+                            <div className="flex gap-2 items-center w-full md:w-auto">
+                                <span className="font-bold text-blue-800 whitespace-nowrap">Select Class:</span>
+                                <select className="border p-2 rounded w-full md:w-64" value={selClass} onChange={e=>setSelClass(e.target.value)}>
                                     {classes.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
                                 </select>
                             </div>
-                            <div className="font-mono">Total Hours: {classWork.reduce((a,b)=>a+b.hoursPerWeek, 0)}</div>
+                            <div className="font-mono text-blue-800 bg-white px-3 py-1 rounded border">
+                                Total Load: <strong>{classWork.reduce((a,b)=>a+b.hoursPerWeek, 0)}</strong> / 25
+                            </div>
                         </div>
 
-                        <div className="bg-white p-6 rounded shadow border grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
-                            <div><label className="text-xs font-bold block mb-1">Subject</label>
-                                <select className="border p-2 rounded w-full" value={form.subId} onChange={e=>setForm({...form, subId:e.target.value})}>
-                                    <option value="">Select</option>{subjects.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
-                                </select>
+                        {/* Input Form */}
+                        <div className={`p-6 rounded-lg shadow-sm border transition-colors ${editId ? 'bg-orange-50 border-orange-200' : 'bg-white border-gray-200'}`}>
+                            <h4 className={`text-sm font-bold uppercase mb-4 tracking-wide ${editId ? 'text-orange-700' : 'text-gray-500'}`}>
+                                {editId ? "Editing Entry..." : "Assign New Workload"}
+                            </h4>
+                            
+                            <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
+                                <div className="md:col-span-3">
+                                    <label className="text-xs font-bold text-gray-500 block mb-1">Subject</label>
+                                    <select className="border p-2 rounded w-full bg-white" value={form.subId} onChange={e=>setForm({...form, subId:e.target.value})}>
+                                        <option value="">Select Subject</option>{subjects.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
+                                    </select>
+                                </div>
+                                <div className="md:col-span-3">
+                                    <label className="text-xs font-bold text-gray-500 block mb-1">Primary Teacher</label>
+                                    <select className="border p-2 rounded w-full bg-white" value={form.teachId} onChange={e=>setForm({...form, teachId:e.target.value})}>
+                                        <option value="">Select Teacher</option>{faculty.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}
+                                    </select>
+                                </div>
+                                <div className="md:col-span-3">
+                                    <div className="flex items-center gap-2 mb-1">
+                                        <input type="checkbox" id="hasAsst" checked={form.hasAsst} onChange={e=>setForm({...form, hasAsst:e.target.checked})} className="accent-blue-600"/>
+                                        <label htmlFor="hasAsst" className="text-xs font-bold text-gray-500 cursor-pointer">Assistant?</label>
+                                    </div>
+                                    <select className="border p-2 rounded w-full disabled:bg-gray-100 bg-white" disabled={!form.hasAsst} value={form.asstId} onChange={e=>setForm({...form, asstId:e.target.value})}>
+                                        <option value="">-- None --</option>{faculty.filter(f=>f.id!=form.teachId).map(f=><option key={f.id} value={f.id}>{f.name}</option>)}
+                                    </select>
+                                </div>
+                                <div className="md:col-span-1">
+                                    <label className="text-xs font-bold text-gray-500 block mb-1">Hrs</label>
+                                    <input type="number" min="1" max="10" className="border p-2 rounded w-full text-center" value={form.hours} onChange={e=>setForm({...form, hours:e.target.value})} />
+                                </div>
+                                <div className="md:col-span-2 flex gap-1">
+                                    <button onClick={handleSubmit} className={`w-full text-white p-2 rounded h-[42px] font-medium transition-colors ${editId ? 'bg-orange-500 hover:bg-orange-600' : 'bg-green-600 hover:bg-green-700'}`}>
+                                        {editId ? "Update" : "Add"}
+                                    </button>
+                                    {editId && <button onClick={()=>{setEditId(null); setForm({...form, subId:'', hours:1})}} className="bg-gray-200 text-gray-600 px-3 rounded hover:bg-gray-300">X</button>}
+                                </div>
                             </div>
-                            <div><label className="text-xs font-bold block mb-1">Teacher</label>
-                                <select className="border p-2 rounded w-full" value={form.teachId} onChange={e=>setForm({...form, teachId:e.target.value})}>
-                                    <option value="">Select</option>{faculty.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}
-                                </select>
-                            </div>
-                            <div>
-                                <div className="flex items-center gap-1 mb-1"><input type="checkbox" checked={form.hasAsst} onChange={e=>setForm({...form, hasAsst:e.target.checked})} /><label className="text-xs font-bold">Assistant?</label></div>
-                                <select className="border p-2 rounded w-full" disabled={!form.hasAsst} value={form.asstId} onChange={e=>setForm({...form, asstId:e.target.value})}>
-                                    <option value="">None</option>{faculty.filter(f=>f.id!=form.teachId).map(f=><option key={f.id} value={f.id}>{f.name}</option>)}
-                                </select>
-                            </div>
-                            <div><label className="text-xs font-bold block mb-1">Hours</label>
-                                <input type="number" className="border p-2 rounded w-full" value={form.hours} onChange={e=>setForm({...form, hours:e.target.value})} />
-                            </div>
-                            <button onClick={add} className="bg-green-600 text-white p-2 rounded h-[42px] w-full">Add</button>
                         </div>
 
-                        <div className="bg-white rounded shadow border overflow-hidden">
+                        {/* List */}
+                        <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
                             <table className="w-full text-left text-sm">
-                                <thead className="bg-gray-100 border-b"><tr><th className="p-3">Subject</th><th className="p-3">Faculty</th><th className="p-3">Hrs</th><th className="p-3"></th></tr></thead>
-                                <tbody>
-                                    {classWork.map(w => {
+                                <thead className="bg-gray-50 border-b text-gray-500 uppercase text-xs">
+                                    <tr><th className="p-4">Subject</th><th className="p-4">Faculty</th><th className="p-4">Hrs</th><th className="p-4 text-right">Actions</th></tr>
+                                </thead>
+                                <tbody className="divide-y">
+                                    {classWork.length === 0 ? <tr><td colSpan="4" className="p-8 text-center text-gray-400 italic">No workload assigned for this class yet.</td></tr> : classWork.map(w => {
                                         const s = subjects.find(x=>x.id===w.subjectId);
                                         const t = faculty.find(x=>x.id===w.teacherId);
                                         const a = faculty.find(x=>x.id===w.assistantId);
                                         return (
-                                            <tr key={w.id} className="border-b hover:bg-gray-50">
-                                                <td className="p-3">{s?.name}</td>
-                                                <td className="p-3">
-                                                    <span className="bg-blue-100 px-2 py-1 rounded text-xs mr-1">{t?.short}</span>
-                                                    {a && <span className="bg-cyan-100 px-2 py-1 rounded text-xs">+ {a?.short}</span>}
+                                            <tr key={w.id} className={`transition-colors ${editId === w.id ? 'bg-orange-50' : 'hover:bg-gray-50'}`}>
+                                                <td className="p-4 font-medium text-gray-900">{s?.name}</td>
+                                                <td className="p-4">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs font-bold">{t?.short}</span>
+                                                        {a && <span className="bg-cyan-100 text-cyan-700 px-2 py-1 rounded text-xs">+ {a?.short}</span>}
+                                                    </div>
                                                 </td>
-                                                <td className="p-3 font-bold">{w.hoursPerWeek}</td>
-                                                <td className="p-3"><button onClick={()=>setWorkload(workload.filter(x=>x.id!==w.id))} className="text-red-500"><Icon name="trash-2" /></button></td>
+                                                <td className="p-4 font-bold text-gray-600">{w.hoursPerWeek}</td>
+                                                <td className="p-4 text-right">
+                                                    <div className="flex justify-end gap-1">
+                                                        <button onClick={()=>startEdit(w)} className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded"><Icon name="pencil" className="w-4 h-4" /></button>
+                                                        <button onClick={()=>setWorkload(workload.filter(x=>x.id!==w.id))} className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded"><Icon name="trash-2" className="w-4 h-4" /></button>
+                                                    </div>
+                                                </td>
                                             </tr>
                                         );
                                     })}
@@ -333,35 +472,54 @@
             };
 
             const ResultsTab = () => {
-                if(isGenerating) return <div className="h-64 flex items-center justify-center flex-col"><Icon name="refresh-cw" className="animate-spin mb-2" /> Generating...</div>;
-                if(generationError) return <div className="bg-red-50 p-8 text-center text-red-600 border border-red-200 rounded">Error: {generationError} <br/><button onClick={()=>setActiveTab('workload')} className="text-blue-600 underline mt-2">Go Back</button></div>;
-                if(!finalSchedule) return <div className="text-center p-12 text-gray-400">Press Generate to view results.</div>;
+                if(isGenerating) return <div className="h-96 flex flex-col items-center justify-center text-gray-500"><Icon name="refresh-cw" className="w-12 h-12 animate-spin mb-4 text-blue-500" /><h2 className="text-xl font-bold text-gray-800">Calculating...</h2><p>Finding the best slots for {workload.length} classes.</p></div>;
+                if(generationError) return <div className="bg-red-50 p-10 text-center rounded-lg border border-red-100"><Icon name="alert-circle" className="w-12 h-12 text-red-500 mx-auto mb-4" /><h3 className="text-xl font-bold text-red-800 mb-2">Generation Failed</h3><p className="text-red-600 mb-6 max-w-md mx-auto">{generationError}</p><button onClick={()=>setActiveTab('workload')} className="bg-white border border-red-200 text-red-600 px-6 py-2 rounded-full font-medium hover:bg-red-50 transition-colors">Adjust Workload Matrix</button></div>;
+                if(!finalSchedule) return <div className="text-center p-20 text-gray-400 bg-white rounded-lg border border-dashed"><Icon name="calendar" className="w-16 h-16 mx-auto mb-4 text-gray-200" /><p className="text-lg">Ready to Generate.</p><p className="text-sm">Click the button below to create the timetable.</p></div>;
 
                 const days = ["Mon", "Tue", "Wed", "Thu", "Fri"];
                 return (
-                    <div className="space-y-8">
+                    <div className="space-y-12">
                         {classes.map(cls => (
-                            <div key={cls.id} className="bg-white rounded shadow border overflow-hidden">
-                                <div className="bg-gray-100 p-3 font-bold border-b">{cls.name}</div>
+                            <div key={cls.id} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                                <div className="bg-slate-50 px-6 py-4 border-b flex justify-between items-center">
+                                    <h3 className="text-lg font-bold text-slate-800">{cls.name}</h3>
+                                    <span className="text-xs font-mono text-slate-400">{cls.short}</span>
+                                </div>
                                 <div className="overflow-x-auto">
                                     <table className="w-full text-center text-sm border-collapse">
-                                        <thead><tr><th className="border p-2 w-20">Day</th>{[1,2,3,4,5].map(p=><th key={p} className="border p-2">P{p}</th>)}</tr></thead>
+                                        <thead>
+                                            <tr>
+                                                <th className="p-3 border-b border-r bg-slate-50 w-24 text-slate-500 uppercase text-xs tracking-wider">Day</th>
+                                                {[1,2,3,4,5].map(p=><th key={p} className="p-3 border-b border-r bg-slate-50 text-slate-500 uppercase text-xs tracking-wider">Period {p}</th>)}
+                                            </tr>
+                                        </thead>
                                         <tbody>
                                             {days.map((day, dIdx) => (
                                                 <tr key={day}>
-                                                    <td className="border p-2 font-bold bg-gray-50">{day}</td>
+                                                    <td className="p-4 border-b border-r font-bold text-slate-400 bg-slate-50/50">{day}</td>
                                                     {[1,2,3,4,5].map(p => {
                                                         const slot = finalSchedule[cls.id][dIdx][p];
-                                                        if(!slot) return <td key={p} className="border p-2 text-gray-300">-</td>;
+                                                        if(!slot) return <td key={p} className="p-2 border-b border-r text-gray-200 bg-white hover:bg-gray-50 transition-colors">-</td>;
+                                                        
                                                         const sub = subjects.find(x=>x.id===slot.subjectId);
                                                         const tea = faculty.find(x=>x.id===slot.teacherId);
                                                         const asst = faculty.find(x=>x.id===slot.assistantId);
+                                                        
                                                         return (
-                                                            <td key={p} className="border p-2">
-                                                                <div className="font-bold">{sub?.code || sub?.name}</div>
-                                                                <div className="text-xs mt-1">
-                                                                    <span style={{background:tea?.color}} className="px-1 rounded border mr-1">{tea?.short}</span>
-                                                                    {asst && <span style={{background:asst?.color}} className="px-1 rounded border">{asst?.short}</span>}
+                                                            <td key={p} className="p-2 border-b border-r bg-white hover:bg-blue-50 transition-colors relative group h-24 align-middle">
+                                                                <div className="flex flex-col items-center gap-1">
+                                                                    <div className="font-bold text-slate-800 leading-tight">{sub?.name}</div>
+                                                                    <div className="text-[10px] text-slate-400">{sub?.code}</div>
+                                                                    <div className="flex gap-1 mt-1">
+                                                                        <span style={{backgroundColor: tea?.color}} className="px-2 py-0.5 rounded text-[10px] font-bold border border-black/5 shadow-sm">
+                                                                            {tea?.short}
+                                                                        </span>
+                                                                        {asst && (
+                                                                            <span style={{backgroundColor: asst?.color}} className="px-2 py-0.5 rounded text-[10px] font-bold border border-black/5 shadow-sm">
+                                                                                {asst?.short}
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
                                                                 </div>
                                                             </td>
                                                         );
@@ -378,32 +536,61 @@
             };
 
             return (
-                <div className="min-h-screen pb-20">
-                    <div className="bg-white border-b sticky top-0 z-10 px-4 h-16 flex items-center justify-between shadow-sm">
-                        <h1 className="font-bold text-xl flex items-center gap-2"><Icon name="calendar" /> Timetable Architect</h1>
-                        <button onClick={saveData} className="text-blue-600 font-bold text-sm flex gap-1"><Icon name="save" /> Save</button>
+                <div className="min-h-screen pb-24">
+                    {/* TOP BAR */}
+                    <div className="bg-white border-b sticky top-0 z-20 px-4 h-16 flex items-center justify-between shadow-sm/50 backdrop-blur-md bg-white/90">
+                        <div className="flex items-center gap-3">
+                            <div className="bg-blue-600 text-white p-2 rounded-lg shadow-blue-200 shadow-lg">
+                                <Icon name="calendar-clock" className="w-5 h-5" />
+                            </div>
+                            <h1 className="font-bold text-xl text-slate-800 tracking-tight hidden md:block">Timetable Architect</h1>
+                        </div>
+                        <div className="flex items-center gap-4">
+                            <span className={`text-xs font-medium transition-opacity duration-300 ${saveStatus ? 'opacity-100 text-green-600' : 'opacity-0'}`}>
+                                <Icon name="check-circle" className="w-3 h-3 inline mr-1"/> Auto-saved
+                            </span>
+                        </div>
                     </div>
                     
-                    <div className="px-4 mt-2 overflow-x-auto">
-                        <div className="flex space-x-1 border-b">
-                            {['faculty','entities','workload','results'].map(t => (
-                                <button key={t} onClick={()=>setActiveTab(t)} className={`px-4 py-2 capitalize border-b-2 ${activeTab===t ? 'border-blue-600 text-blue-600':'border-transparent text-gray-500'}`}>
-                                    {t}
-                                </button>
-                            ))}
+                    {/* TABS */}
+                    <div className="bg-white border-b sticky top-16 z-10 shadow-sm">
+                        <div className="max-w-6xl mx-auto px-4">
+                            <div className="flex space-x-6 overflow-x-auto no-scrollbar">
+                                {[
+                                    {id:'faculty', icon:'users', label:'Faculty'},
+                                    {id:'entities', icon:'layers', label:'Classes & Subjects'},
+                                    {id:'workload', icon:'briefcase', label:'Workload Matrix'},
+                                    {id:'results', icon:'calendar-check', label:'Final Schedule'}
+                                ].map(t => (
+                                    <button 
+                                        key={t.id} 
+                                        onClick={()=>setActiveTab(t.id)} 
+                                        className={`flex items-center gap-2 py-4 border-b-2 text-sm font-medium transition-all whitespace-nowrap ${activeTab===t.id ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}
+                                    >
+                                        <Icon name={t.icon} className="w-4 h-4" />
+                                        {t.label}
+                                    </button>
+                                ))}
+                            </div>
                         </div>
                     </div>
 
-                    <div className="max-w-6xl mx-auto p-4">
+                    {/* MAIN CONTENT */}
+                    <div className="max-w-6xl mx-auto p-4 md:p-8">
                         {activeTab === 'faculty' && <FacultyTab />}
                         {activeTab === 'entities' && <EntitiesTab />}
                         {activeTab === 'workload' && <WorkloadTab />}
                         {activeTab === 'results' && <ResultsTab />}
                     </div>
 
+                    {/* FAB */}
                     {activeTab !== 'results' && (
-                        <button onClick={handleGenerate} className="fixed bottom-8 right-8 bg-blue-600 text-white px-6 py-3 rounded-full shadow-lg font-bold flex items-center gap-2 hover:scale-105 transition-transform">
-                            <Icon name="play" /> Generate
+                        <button 
+                            onClick={handleGenerate} 
+                            className="fixed bottom-8 right-8 bg-blue-600 text-white px-6 py-4 rounded-full shadow-xl shadow-blue-600/30 font-bold flex items-center gap-2 hover:scale-105 transition-transform z-50"
+                        >
+                            <Icon name="play" className="w-5 h-5 fill-current" /> 
+                            Generate Timetable
                         </button>
                     )}
                 </div>
@@ -413,5 +600,9 @@
         const root = createRoot(document.getElementById('root'));
         root.render(<TimetableApp />);
     </script>
+    <style>
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
 </body>
 </html>
