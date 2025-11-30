@@ -1,12 +1,417 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Timetable Architect</title>
-  </head>
-  <body>
+    
+    <!-- 1. Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- 2. Load React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- 3. Load Babel (To translate JSX in the browser) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- 4. Load Icons (Lucide) -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body class="bg-gray-50">
     <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
+
+    <!-- MAIN SCRIPT -->
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+        const { createRoot } = ReactDOM;
+        
+        // --- ICONS WRAPPER (Since we are using CDN icons) ---
+        const Icon = ({ name, className }) => <i data-lucide={name} className={className}></i>;
+
+        // --- LOGIC ENGINE (Backtracking Algorithm) ---
+        const generateId = () => Math.floor(Math.random() * 100000);
+
+        const runBacktrackingAlgorithm = (workload, classes, subjects, faculty, constraints) => {
+            const DAYS = 5; 
+            const PERIODS = 5; 
+            
+            const schedule = {}; 
+            classes.forEach(cls => {
+                schedule[cls.id] = Array(DAYS).fill(null).map(() => Array(PERIODS + 1).fill(null)); 
+            });
+
+            let tasks = [];
+            workload.forEach(w => {
+                for (let i = 0; i < w.hoursPerWeek; i++) {
+                    tasks.push({ ...w, uniqueId: generateId() });
+                }
+            });
+
+            tasks.sort((a, b) => {
+                if (a.type === 'Joint' && b.type !== 'Joint') return -1;
+                return 0;
+            });
+
+            const isValid = (task, day, period, currentSchedule) => {
+                if (currentSchedule[task.classId][day][period] !== null) return false;
+
+                for (const cls of classes) {
+                    const slot = currentSchedule[cls.id][day][period];
+                    if (slot) {
+                        if (slot.teacherId === task.teacherId || slot.assistantId === task.teacherId) return false;
+                        if (task.assistantId) {
+                            if (slot.teacherId === task.assistantId || slot.assistantId === task.assistantId) return false;
+                        }
+                    }
+                }
+
+                if (constraints.maxConsecutive && period > constraints.maxConsecutive) {
+                    let consecutiveCount = 0;
+                    for (let p = period - 1; p >= 1; p--) {
+                        let isTeacherBusyInThisSlot = false;
+                        for (const cls of classes) {
+                            const slot = currentSchedule[cls.id][day][p];
+                            if (slot && (slot.teacherId === task.teacherId || slot.assistantId === task.teacherId)) {
+                                isTeacherBusyInThisSlot = true;
+                                break;
+                            }
+                        }
+                        if (isTeacherBusyInThisSlot) consecutiveCount++;
+                        else break;
+                    }
+                    if (consecutiveCount >= constraints.maxConsecutive) return false;
+                }
+                return true;
+            };
+
+            const solve = (taskIndex) => {
+                if (taskIndex >= tasks.length) return true;
+                const task = tasks[taskIndex];
+                
+                for (let day = 0; day < DAYS; day++) {
+                    for (let period = 1; period <= PERIODS; period++) {
+                        if (isValid(task, day, period, schedule)) {
+                            schedule[task.classId][day][period] = task;
+                            if (solve(taskIndex + 1)) return true;
+                            schedule[task.classId][day][period] = null;
+                        }
+                    }
+                }
+                return false;
+            };
+
+            if (solve(0)) return schedule;
+            throw new Error("Conflict found! Could not generate timetable.");
+        };
+
+        // --- APP COMPONENT ---
+        const TimetableApp = () => {
+            const [activeTab, setActiveTab] = useState('faculty');
+            const [isGenerating, setIsGenerating] = useState(false);
+            const [generationError, setGenerationError] = useState(null);
+            
+            // --- INITIAL DATA ---
+            const [faculty, setFaculty] = useState([
+                { id: 1, name: 'Suresh V', short: 'SV', color: '#ffebee' },
+                { id: 2, name: 'Sojan Jose', short: 'SJ', color: '#e0f7ff' },
+                { id: 3, name: 'Rasmi AR', short: 'ARR', color: '#e8f5e9' }
+            ]);
+
+            const [classes, setClasses] = useState([
+                { id: 1, name: 'BSc Botany S6', short: 'S6' },
+                { id: 2, name: 'MSc Botany S2', short: 'PG2' }
+            ]);
+
+            const [subjects, setSubjects] = useState([
+                { id: 1, name: 'Genetics', code: 'BOT101' },
+                { id: 2, name: 'Plant Physiology', code: 'BOT102' },
+                { id: 3, name: 'Practical Lab 1', code: 'LAB1' }
+            ]);
+
+            const [workload, setWorkload] = useState([]);
+            const [constraints, setConstraints] = useState({
+                maxConsecutive: 2,
+                maxDailyHours: 4,
+                forceFreeHourAfterConsecutive: true,
+                ensureAllDaysEngaged: true
+            });
+
+            const [finalSchedule, setFinalSchedule] = useState(null);
+
+            // Load Data
+            useEffect(() => {
+                const savedData = localStorage.getItem('timetable_builder_data');
+                if (savedData) {
+                    try {
+                        const parsed = JSON.parse(savedData);
+                        if(parsed.faculty) setFaculty(parsed.faculty);
+                        if(parsed.classes) setClasses(parsed.classes);
+                        if(parsed.subjects) setSubjects(parsed.subjects);
+                        if(parsed.workload) setWorkload(parsed.workload);
+                        if(parsed.constraints) setConstraints(parsed.constraints);
+                    } catch (e) { console.error(e); }
+                }
+                // Initialize Lucide icons
+                if(window.lucide) window.lucide.createIcons();
+            }, []);
+
+            // Re-run icons when tab changes
+            useEffect(() => {
+                if(window.lucide) window.lucide.createIcons();
+            }, [activeTab, finalSchedule]);
+
+            const saveData = () => {
+                const data = { faculty, classes, subjects, workload, constraints };
+                localStorage.setItem('timetable_builder_data', JSON.stringify(data));
+                alert('Data saved successfully!');
+            };
+
+            const handleGenerate = () => {
+                setIsGenerating(true);
+                setGenerationError(null);
+                setActiveTab('results');
+                
+                setTimeout(() => {
+                    try {
+                        const result = runBacktrackingAlgorithm(workload, classes, subjects, faculty, constraints);
+                        setFinalSchedule(result);
+                    } catch (err) {
+                        setGenerationError(err.message);
+                    } finally {
+                        setIsGenerating(false);
+                    }
+                }, 100);
+            };
+
+            // --- TABS UI ---
+            const FacultyTab = () => {
+                const [newName, setNewName] = useState('');
+                const [newShort, setNewShort] = useState('');
+                const add = () => {
+                    if(!newName) return;
+                    setFaculty([...faculty, { id: Date.now(), name: newName, short: newShort, color: '#f3f4f6' }]);
+                    setNewName(''); setNewShort('');
+                };
+                return (
+                    <div className="space-y-6">
+                        <div className="bg-white p-6 rounded shadow border">
+                            <h3 className="font-bold mb-4 flex gap-2"><Icon name="users" /> Add Faculty</h3>
+                            <div className="flex gap-2">
+                                <input className="border p-2 rounded flex-1" placeholder="Name" value={newName} onChange={e=>setNewName(e.target.value)} />
+                                <input className="border p-2 rounded w-24" placeholder="Abbr" value={newShort} onChange={e=>setNewShort(e.target.value)} />
+                                <button onClick={add} className="bg-blue-600 text-white px-4 rounded">Add</button>
+                            </div>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            {faculty.map(f => (
+                                <div key={f.id} className="bg-white p-4 rounded shadow border flex justify-between">
+                                    <div><p className="font-bold">{f.name}</p><span className="text-xs bg-gray-100 px-2 py-1 rounded">{f.short}</span></div>
+                                    <button onClick={()=>setFaculty(faculty.filter(x=>x.id!==f.id))} className="text-red-500"><Icon name="trash-2" /></button>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                );
+            };
+
+            const EntitiesTab = () => {
+                const [newClass, setNewClass] = useState({name:'', short:''});
+                const [newSub, setNewSub] = useState({name:'', code:''});
+                return (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        {/* Classes */}
+                        <div className="space-y-4">
+                            <div className="bg-white p-6 rounded shadow border">
+                                <h3 className="font-bold mb-4 flex gap-2"><Icon name="graduation-cap" /> Classes</h3>
+                                <div className="flex gap-2 mb-2">
+                                    <input className="border p-2 rounded flex-1" placeholder="Class Name" value={newClass.name} onChange={e=>setNewClass({...newClass, name:e.target.value})} />
+                                    <input className="border p-2 rounded w-24" placeholder="Short" value={newClass.short} onChange={e=>setNewClass({...newClass, short:e.target.value})} />
+                                    <button onClick={()=>{setClasses([...classes, {id:Date.now(), ...newClass}]); setNewClass({name:'', short:''})}} className="bg-blue-600 text-white px-3 rounded">+</button>
+                                </div>
+                                <ul className="divide-y">
+                                    {classes.map(c=>(<li key={c.id} className="py-2 flex justify-between"><span>{c.name}</span><button onClick={()=>setClasses(classes.filter(x=>x.id!==c.id))} className="text-red-500"><Icon name="trash-2" /></button></li>))}
+                                </ul>
+                            </div>
+                        </div>
+                        {/* Subjects */}
+                        <div className="space-y-4">
+                            <div className="bg-white p-6 rounded shadow border">
+                                <h3 className="font-bold mb-4 flex gap-2"><Icon name="book-open" /> Subjects</h3>
+                                <div className="flex gap-2 mb-2">
+                                    <input className="border p-2 rounded flex-1" placeholder="Subject Name" value={newSub.name} onChange={e=>setNewSub({...newSub, name:e.target.value})} />
+                                    <input className="border p-2 rounded w-24" placeholder="Code" value={newSub.code} onChange={e=>setNewSub({...newSub, code:e.target.value})} />
+                                    <button onClick={()=>{setSubjects([...subjects, {id:Date.now(), ...newSub}]); setNewSub({name:'', code:''})}} className="bg-blue-600 text-white px-3 rounded">+</button>
+                                </div>
+                                <ul className="divide-y max-h-64 overflow-auto">
+                                    {subjects.map(s=>(<li key={s.id} className="py-2 flex justify-between"><span>{s.name}</span><button onClick={()=>setSubjects(subjects.filter(x=>x.id!==s.id))} className="text-red-500"><Icon name="trash-2" /></button></li>))}
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                );
+            };
+
+            const WorkloadTab = () => {
+                const [selClass, setSelClass] = useState(classes[0]?.id || '');
+                const [form, setForm] = useState({ subId: '', teachId: '', asstId: '', hasAsst: false, hours: 1 });
+                
+                const add = () => {
+                    if(!selClass || !form.subId || !form.teachId) return;
+                    setWorkload([...workload, {
+                        id: Date.now(),
+                        classId: parseInt(selClass),
+                        subjectId: parseInt(form.subId),
+                        teacherId: parseInt(form.teachId),
+                        assistantId: form.hasAsst ? parseInt(form.asstId) : null,
+                        hoursPerWeek: parseInt(form.hours),
+                        type: form.hasAsst ? 'Joint' : 'Normal'
+                    }]);
+                };
+                const classWork = workload.filter(w => w.classId == selClass);
+                
+                return (
+                    <div className="space-y-6">
+                        <div className="bg-blue-50 p-4 rounded border flex justify-between items-center">
+                            <div className="flex gap-2 items-center">
+                                <span className="font-bold">Select Class:</span>
+                                <select className="border p-2 rounded" value={selClass} onChange={e=>setSelClass(e.target.value)}>
+                                    {classes.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+                                </select>
+                            </div>
+                            <div className="font-mono">Total Hours: {classWork.reduce((a,b)=>a+b.hoursPerWeek, 0)}</div>
+                        </div>
+
+                        <div className="bg-white p-6 rounded shadow border grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
+                            <div><label className="text-xs font-bold block mb-1">Subject</label>
+                                <select className="border p-2 rounded w-full" value={form.subId} onChange={e=>setForm({...form, subId:e.target.value})}>
+                                    <option value="">Select</option>{subjects.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
+                                </select>
+                            </div>
+                            <div><label className="text-xs font-bold block mb-1">Teacher</label>
+                                <select className="border p-2 rounded w-full" value={form.teachId} onChange={e=>setForm({...form, teachId:e.target.value})}>
+                                    <option value="">Select</option>{faculty.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}
+                                </select>
+                            </div>
+                            <div>
+                                <div className="flex items-center gap-1 mb-1"><input type="checkbox" checked={form.hasAsst} onChange={e=>setForm({...form, hasAsst:e.target.checked})} /><label className="text-xs font-bold">Assistant?</label></div>
+                                <select className="border p-2 rounded w-full" disabled={!form.hasAsst} value={form.asstId} onChange={e=>setForm({...form, asstId:e.target.value})}>
+                                    <option value="">None</option>{faculty.filter(f=>f.id!=form.teachId).map(f=><option key={f.id} value={f.id}>{f.name}</option>)}
+                                </select>
+                            </div>
+                            <div><label className="text-xs font-bold block mb-1">Hours</label>
+                                <input type="number" className="border p-2 rounded w-full" value={form.hours} onChange={e=>setForm({...form, hours:e.target.value})} />
+                            </div>
+                            <button onClick={add} className="bg-green-600 text-white p-2 rounded h-[42px] w-full">Add</button>
+                        </div>
+
+                        <div className="bg-white rounded shadow border overflow-hidden">
+                            <table className="w-full text-left text-sm">
+                                <thead className="bg-gray-100 border-b"><tr><th className="p-3">Subject</th><th className="p-3">Faculty</th><th className="p-3">Hrs</th><th className="p-3"></th></tr></thead>
+                                <tbody>
+                                    {classWork.map(w => {
+                                        const s = subjects.find(x=>x.id===w.subjectId);
+                                        const t = faculty.find(x=>x.id===w.teacherId);
+                                        const a = faculty.find(x=>x.id===w.assistantId);
+                                        return (
+                                            <tr key={w.id} className="border-b hover:bg-gray-50">
+                                                <td className="p-3">{s?.name}</td>
+                                                <td className="p-3">
+                                                    <span className="bg-blue-100 px-2 py-1 rounded text-xs mr-1">{t?.short}</span>
+                                                    {a && <span className="bg-cyan-100 px-2 py-1 rounded text-xs">+ {a?.short}</span>}
+                                                </td>
+                                                <td className="p-3 font-bold">{w.hoursPerWeek}</td>
+                                                <td className="p-3"><button onClick={()=>setWorkload(workload.filter(x=>x.id!==w.id))} className="text-red-500"><Icon name="trash-2" /></button></td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                );
+            };
+
+            const ResultsTab = () => {
+                if(isGenerating) return <div className="h-64 flex items-center justify-center flex-col"><Icon name="refresh-cw" className="animate-spin mb-2" /> Generating...</div>;
+                if(generationError) return <div className="bg-red-50 p-8 text-center text-red-600 border border-red-200 rounded">Error: {generationError} <br/><button onClick={()=>setActiveTab('workload')} className="text-blue-600 underline mt-2">Go Back</button></div>;
+                if(!finalSchedule) return <div className="text-center p-12 text-gray-400">Press Generate to view results.</div>;
+
+                const days = ["Mon", "Tue", "Wed", "Thu", "Fri"];
+                return (
+                    <div className="space-y-8">
+                        {classes.map(cls => (
+                            <div key={cls.id} className="bg-white rounded shadow border overflow-hidden">
+                                <div className="bg-gray-100 p-3 font-bold border-b">{cls.name}</div>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-center text-sm border-collapse">
+                                        <thead><tr><th className="border p-2 w-20">Day</th>{[1,2,3,4,5].map(p=><th key={p} className="border p-2">P{p}</th>)}</tr></thead>
+                                        <tbody>
+                                            {days.map((day, dIdx) => (
+                                                <tr key={day}>
+                                                    <td className="border p-2 font-bold bg-gray-50">{day}</td>
+                                                    {[1,2,3,4,5].map(p => {
+                                                        const slot = finalSchedule[cls.id][dIdx][p];
+                                                        if(!slot) return <td key={p} className="border p-2 text-gray-300">-</td>;
+                                                        const sub = subjects.find(x=>x.id===slot.subjectId);
+                                                        const tea = faculty.find(x=>x.id===slot.teacherId);
+                                                        const asst = faculty.find(x=>x.id===slot.assistantId);
+                                                        return (
+                                                            <td key={p} className="border p-2">
+                                                                <div className="font-bold">{sub?.code || sub?.name}</div>
+                                                                <div className="text-xs mt-1">
+                                                                    <span style={{background:tea?.color}} className="px-1 rounded border mr-1">{tea?.short}</span>
+                                                                    {asst && <span style={{background:asst?.color}} className="px-1 rounded border">{asst?.short}</span>}
+                                                                </div>
+                                                            </td>
+                                                        );
+                                                    })}
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                );
+            };
+
+            return (
+                <div className="min-h-screen pb-20">
+                    <div className="bg-white border-b sticky top-0 z-10 px-4 h-16 flex items-center justify-between shadow-sm">
+                        <h1 className="font-bold text-xl flex items-center gap-2"><Icon name="calendar" /> Timetable Architect</h1>
+                        <button onClick={saveData} className="text-blue-600 font-bold text-sm flex gap-1"><Icon name="save" /> Save</button>
+                    </div>
+                    
+                    <div className="px-4 mt-2 overflow-x-auto">
+                        <div className="flex space-x-1 border-b">
+                            {['faculty','entities','workload','results'].map(t => (
+                                <button key={t} onClick={()=>setActiveTab(t)} className={`px-4 py-2 capitalize border-b-2 ${activeTab===t ? 'border-blue-600 text-blue-600':'border-transparent text-gray-500'}`}>
+                                    {t}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="max-w-6xl mx-auto p-4">
+                        {activeTab === 'faculty' && <FacultyTab />}
+                        {activeTab === 'entities' && <EntitiesTab />}
+                        {activeTab === 'workload' && <WorkloadTab />}
+                        {activeTab === 'results' && <ResultsTab />}
+                    </div>
+
+                    {activeTab !== 'results' && (
+                        <button onClick={handleGenerate} className="fixed bottom-8 right-8 bg-blue-600 text-white px-6 py-3 rounded-full shadow-lg font-bold flex items-center gap-2 hover:scale-105 transition-transform">
+                            <Icon name="play" /> Generate
+                        </button>
+                    )}
+                </div>
+            );
+        };
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<TimetableApp />);
+    </script>
+</body>
 </html>
