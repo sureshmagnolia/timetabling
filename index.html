@@ -58,7 +58,7 @@
                 // 1. Room Check
                 if (currentSchedule[task.classId][day][period] !== null) return false;
 
-                // 2. Teacher Check (Iterate all classes to see if teacher is busy)
+                // 2. Teacher Conflict Check
                 for (const cls of classes) {
                     const slot = currentSchedule[cls.id][day][period];
                     if (slot) {
@@ -73,8 +73,8 @@
                     }
                 }
 
-                // 3. Constraints Check
-                if (constraints.maxConsecutive && period > constraints.maxConsecutive) {
+                // 3. Constraint: Max Consecutive Hours
+                if (constraints.maxConsecutive) {
                     let consecutiveCount = 0;
                     for (let p = period - 1; p >= 1; p--) {
                         let isBusy = false;
@@ -86,10 +86,25 @@
                             }
                         }
                         if (isBusy) consecutiveCount++;
-                        else break;
+                        else break; 
                     }
                     if (consecutiveCount >= constraints.maxConsecutive) return false;
                 }
+
+                // 4. Constraint: Max Daily Hours
+                if (constraints.maxDailyHours) {
+                    let dailyCount = 0;
+                    for(let p = 1; p <= PERIODS; p++) {
+                        for(const cls of classes) {
+                            const slot = currentSchedule[cls.id][day][p];
+                            if(slot && (slot.teacherId === task.teacherId || slot.assistantId === task.teacherId)) {
+                                dailyCount++;
+                            }
+                        }
+                    }
+                    if (dailyCount >= constraints.maxDailyHours) return false;
+                }
+
                 return true;
             };
 
@@ -134,9 +149,7 @@
             const [workload, setWorkload] = useState([]);
             const [constraints, setConstraints] = useState({
                 maxConsecutive: 2,
-                maxDailyHours: 4,
-                forceFreeHourAfterConsecutive: true,
-                ensureAllDaysEngaged: true
+                maxDailyHours: 4
             });
             const [finalSchedule, setFinalSchedule] = useState(null);
 
@@ -197,13 +210,10 @@
 
                 const handleSubmit = () => {
                     if(!form.name) return;
-                    
                     if (editId) {
-                        // Update existing
                         setFaculty(faculty.map(f => f.id === editId ? { ...f, ...form } : f));
                         setEditId(null);
                     } else {
-                        // Create new
                         setFaculty([...faculty, { id: Date.now(), ...form, color: '#f3f4f6' }]);
                     }
                     setForm({ name: '', short: '' });
@@ -251,11 +261,8 @@
             };
 
             const EntitiesTab = () => {
-                // Class State
                 const [classForm, setClassForm] = useState({ name: '', short: '' });
                 const [editClassId, setEditClassId] = useState(null);
-                
-                // Subject State
                 const [subForm, setSubForm] = useState({ name: '', code: '' });
                 const [editSubId, setEditSubId] = useState(null);
 
@@ -283,7 +290,6 @@
 
                 return (
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                        {/* Classes Section */}
                         <div className="space-y-4">
                             <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
                                 <h3 className="font-bold mb-4 flex items-center gap-2 text-blue-800"><Icon name="graduation-cap" className="w-5 h-5"/> Classes</h3>
@@ -293,7 +299,6 @@
                                     <button onClick={handleClassSubmit} className={`px-4 rounded text-white ${editClassId ? 'bg-orange-500' : 'bg-blue-600'}`}>{editClassId ? <Icon name="check" className="w-4 h-4" /> : <Icon name="plus" className="w-4 h-4" />}</button>
                                 </div>
                                 {editClassId && <button onClick={()=>{setEditClassId(null); setClassForm({name:'', short:''})}} className="text-xs text-gray-500 underline mb-2">Cancel Edit</button>}
-                                
                                 <ul className="divide-y border rounded bg-gray-50">
                                     {classes.map(c=>(
                                         <li key={c.id} className={`p-3 flex justify-between items-center ${editClassId===c.id ? 'bg-orange-50' : ''}`}>
@@ -307,8 +312,6 @@
                                 </ul>
                             </div>
                         </div>
-
-                        {/* Subjects Section */}
                         <div className="space-y-4">
                             <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
                                 <h3 className="font-bold mb-4 flex items-center gap-2 text-blue-800"><Icon name="book-open" className="w-5 h-5"/> Subjects</h3>
@@ -318,7 +321,6 @@
                                     <button onClick={handleSubSubmit} className={`px-4 rounded text-white ${editSubId ? 'bg-orange-500' : 'bg-blue-600'}`}>{editSubId ? <Icon name="check" className="w-4 h-4" /> : <Icon name="plus" className="w-4 h-4" />}</button>
                                 </div>
                                 {editSubId && <button onClick={()=>{setEditSubId(null); setSubForm({name:'', code:''})}} className="text-xs text-gray-500 underline mb-2">Cancel Edit</button>}
-
                                 <ul className="divide-y border rounded bg-gray-50 max-h-96 overflow-y-auto">
                                     {subjects.map(s=>(
                                         <li key={s.id} className={`p-3 flex justify-between items-center ${editSubId===s.id ? 'bg-orange-50' : ''}`}>
@@ -359,13 +361,11 @@
                     } else {
                         setWorkload([...workload, { id: Date.now(), ...payload }]);
                     }
-                    // Reset form partially
                     setForm({ ...form, subId: '', hours: 1 }); 
                 };
 
                 const startEdit = (w) => {
                     setEditId(w.id);
-                    // Ensure we switch the view to the class of the item being edited
                     setSelClass(w.classId);
                     setForm({
                         subId: w.subjectId,
@@ -380,7 +380,6 @@
                 
                 return (
                     <div className="space-y-6">
-                        {/* Selector Header */}
                         <div className="bg-blue-50 p-4 rounded-lg border border-blue-100 flex flex-col md:flex-row justify-between items-center gap-4">
                             <div className="flex gap-2 items-center w-full md:w-auto">
                                 <span className="font-bold text-blue-800 whitespace-nowrap">Select Class:</span>
@@ -393,12 +392,10 @@
                             </div>
                         </div>
 
-                        {/* Input Form */}
                         <div className={`p-6 rounded-lg shadow-sm border transition-colors ${editId ? 'bg-orange-50 border-orange-200' : 'bg-white border-gray-200'}`}>
                             <h4 className={`text-sm font-bold uppercase mb-4 tracking-wide ${editId ? 'text-orange-700' : 'text-gray-500'}`}>
                                 {editId ? "Editing Entry..." : "Assign New Workload"}
                             </h4>
-                            
                             <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
                                 <div className="md:col-span-3">
                                     <label className="text-xs font-bold text-gray-500 block mb-1">Subject</label>
@@ -434,7 +431,6 @@
                             </div>
                         </div>
 
-                        {/* List */}
                         <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
                             <table className="w-full text-left text-sm">
                                 <thead className="bg-gray-50 border-b text-gray-500 uppercase text-xs">
@@ -466,6 +462,61 @@
                                     })}
                                 </tbody>
                             </table>
+                        </div>
+                    </div>
+                );
+            };
+
+            const ConstraintsTab = () => {
+                return (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+                            <h3 className="text-lg font-bold mb-4 flex items-center gap-2 text-blue-800">
+                                <Icon name="sliders" className="w-5 h-5"/> Generation Rules
+                            </h3>
+                            <div className="space-y-6">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Max Consecutive Hours</label>
+                                    <div className="flex items-center gap-2">
+                                        <input 
+                                            type="number" 
+                                            min="1" max="5" 
+                                            value={constraints.maxConsecutive}
+                                            onChange={e => setConstraints({...constraints, maxConsecutive: parseInt(e.target.value)})}
+                                            className="border p-2 rounded w-24 text-center"
+                                        />
+                                        <span className="text-sm text-gray-500">hours before a forced break.</span>
+                                    </div>
+                                </div>
+                                
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Max Daily Hours per Teacher</label>
+                                    <div className="flex items-center gap-2">
+                                        <input 
+                                            type="number" 
+                                            min="1" max="5" 
+                                            value={constraints.maxDailyHours}
+                                            onChange={e => setConstraints({...constraints, maxDailyHours: parseInt(e.target.value)})}
+                                            className="border p-2 rounded w-24 text-center"
+                                        />
+                                        <span className="text-sm text-gray-500">total hours in a single day.</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="bg-blue-50 p-6 rounded-lg border border-blue-100">
+                            <h3 className="text-lg font-bold mb-4 flex items-center gap-2 text-blue-800">
+                                <Icon name="info" className="w-5 h-5"/> Logic Info
+                            </h3>
+                            <p className="text-sm text-blue-800 leading-relaxed">
+                                The logic engine uses a backtracking algorithm. It respects "Hard Constraints" automatically:
+                            </p>
+                            <ul className="list-disc list-inside mt-3 space-y-2 text-sm text-blue-700">
+                                <li>A teacher cannot be in two places at once.</li>
+                                <li>A class cannot have two subjects at once.</li>
+                                <li>Assistants must also be free during joint classes.</li>
+                            </ul>
                         </div>
                     </div>
                 );
@@ -560,6 +611,7 @@
                                     {id:'faculty', icon:'users', label:'Faculty'},
                                     {id:'entities', icon:'layers', label:'Classes & Subjects'},
                                     {id:'workload', icon:'briefcase', label:'Workload Matrix'},
+                                    {id:'constraints', icon:'settings', label:'Rules'},
                                     {id:'results', icon:'calendar-check', label:'Final Schedule'}
                                 ].map(t => (
                                     <button 
@@ -580,6 +632,7 @@
                         {activeTab === 'faculty' && <FacultyTab />}
                         {activeTab === 'entities' && <EntitiesTab />}
                         {activeTab === 'workload' && <WorkloadTab />}
+                        {activeTab === 'constraints' && <ConstraintsTab />}
                         {activeTab === 'results' && <ResultsTab />}
                     </div>
 
