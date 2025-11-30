@@ -17,8 +17,18 @@
     
     <!-- 4. Load Icons -->
     <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <style>
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        @keyframes pulse-slow {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .console-line { font-family: 'Courier New', Courier, monospace; }
+    </style>
 </head>
-<body class="bg-gray-50 text-slate-800">
+<body class="bg-gray-50 text-slate-800 font-sans">
     <div id="root"></div>
 
     <script type="text/babel">
@@ -27,81 +37,62 @@
         
         const Icon = ({ name, className, onClick }) => <i data-lucide={name} className={className} onClick={onClick}></i>;
 
-        // --- XML PARSER HELPER ---
+        // --- XML PARSER ---
         const parseXMLData = (xmlText) => {
             const parser = new DOMParser();
             const doc = parser.parseFromString(xmlText, "text/xml");
-
-            // 1. Teachers
             const faculty = Array.from(doc.getElementsByTagName('teacher')).map(t => ({
-                id: t.getAttribute('id'),
-                name: t.getAttribute('name'),
-                short: t.getAttribute('short'),
-                color: t.getAttribute('color') || '#e0f2f1'
+                id: t.getAttribute('id'), name: t.getAttribute('name'), short: t.getAttribute('short'), color: t.getAttribute('color') || '#e0f2f1'
             }));
-
-            // 2. Subjects
             const subjects = Array.from(doc.getElementsByTagName('subject')).map(s => ({
-                id: s.getAttribute('id'),
-                name: s.getAttribute('name'),
-                code: s.getAttribute('short') || s.getAttribute('name').substring(0, 5)
+                id: s.getAttribute('id'), name: s.getAttribute('name'), code: s.getAttribute('short') || s.getAttribute('name').substring(0, 5)
             }));
-
-            // 3. Classes
             const classes = Array.from(doc.getElementsByTagName('class')).map(c => ({
-                id: c.getAttribute('id'),
-                name: c.getAttribute('name'),
-                short: c.getAttribute('short'),
-                unavailable: []
+                id: c.getAttribute('id'), name: c.getAttribute('name'), short: c.getAttribute('short'), unavailable: []
             }));
-
-            // 4. Workload (Lessons)
             const workload = [];
-            const lessons = doc.getElementsByTagName('lesson');
-            
-            Array.from(lessons).forEach(l => {
+            Array.from(doc.getElementsByTagName('lesson')).forEach(l => {
                 const tIds = l.getAttribute('teacherids').split(',');
                 const cIds = l.getAttribute('classids').split(',');
                 const subId = l.getAttribute('subjectid');
                 const periods = parseFloat(l.getAttribute('periodsperweek') || l.getAttribute('periodspercard') || 1);
-                
-                // Handle Joint Classes
                 const primaryTeacher = tIds[0];
                 const assistantTeacher = tIds.length > 1 ? tIds[1] : null;
-                
                 cIds.forEach(cId => {
-                    if (!cId) return;
-                    // Only add if we have valid references
-                    if(primaryTeacher) {
-                        workload.push({
-                            id: l.getAttribute('id') + cId + Math.random().toString(36).substr(2, 5),
-                            classId: cId,
-                            subjectId: subId,
-                            teacherId: primaryTeacher,
-                            assistantId: assistantTeacher,
-                            hoursPerWeek: periods,
-                            type: assistantTeacher ? 'Joint' : 'Normal',
-                            isFixed: false // XML imports are flexible by default
-                        });
-                    }
+                    if (!cId || !primaryTeacher) return;
+                    workload.push({
+                        id: l.getAttribute('id') + cId + Math.random().toString(36).substr(2, 5),
+                        classId: cId, subjectId: subId, teacherId: primaryTeacher, assistantId: assistantTeacher,
+                        hoursPerWeek: periods, type: assistantTeacher ? 'Joint' : 'Normal', isFixed: false
+                    });
                 });
             });
-
             return { faculty, subjects, classes, workload };
         };
 
-        // --- LOGIC ENGINE ---
+        // --- ASYNC LOGIC ENGINE ---
         const generateId = () => Math.floor(Math.random() * 100000);
 
-        const runBacktrackingAlgorithm = (workload, classes, subjects, faculty, constraints) => {
+        // NOTE: This function is now ASYNC and accepts an onProgress callback
+        const runBacktrackingAlgorithm = async (workload, classes, subjects, faculty, constraints, onProgress) => {
             const DAYS = 5; 
             const PERIODS = 5; 
-            
             const schedule = {}; 
+            
+            // Stats Tracking
+            const stats = { 
+                iterations: 0, 
+                roomConflicts: 0, 
+                teacherConflicts: 0, 
+                consecutiveViolations: 0, 
+                dailyViolations: 0 
+            };
+            const startTime = Date.now();
+
+            // Initialize Grid
             classes.forEach(cls => {
                 schedule[cls.id] = Array(DAYS).fill(null).map(() => Array(PERIODS + 1).fill(null));
-                
-                if (cls.unavailable && Array.isArray(cls.unavailable)) {
+                if (cls.unavailable) {
                     cls.unavailable.forEach(slotStr => {
                         const [d, p] = slotStr.split('-').map(Number);
                         if (schedule[cls.id][d]) schedule[cls.id][d][p] = { type: 'BLOCKED' };
@@ -109,6 +100,7 @@
                 }
             });
 
+            // Prepare Tasks
             let tasks = [];
             workload.forEach(w => {
                 if (w.fixedDay !== undefined && w.fixedDay !== "" && w.fixedPeriod) {
@@ -127,20 +119,34 @@
                 return 0;
             });
 
-            const isValid = (task, day, period, currentSchedule) => {
-                if (currentSchedule[task.classId][day][period] !== null) return false;
+            const totalTasks = tasks.length;
 
+            const isValid = (task, day, period, currentSchedule) => {
+                // 1. Room Check
+                if (currentSchedule[task.classId][day][period] !== null) {
+                    stats.roomConflicts++;
+                    return false;
+                }
+
+                // 2. Teacher Conflict
                 for (const cls of classes) {
                     const slot = currentSchedule[cls.id][day][period];
                     if (!slot || slot.type === 'BLOCKED') continue;
 
-                    if (slot.teacherId === task.teacherId || slot.assistantId === task.teacherId) return false;
+                    let isConflict = false;
+                    if (slot.teacherId === task.teacherId || slot.assistantId === task.teacherId) isConflict = true;
                     if (task.assistantId) {
-                        if (slot.teacherId === task.assistantId || slot.assistantId === task.assistantId) return false;
+                        if (slot.teacherId === task.assistantId || slot.assistantId === task.assistantId) isConflict = true;
                     }
-                    if (slot.assistantId === task.teacherId) return false;
+                    if (slot.assistantId === task.teacherId) isConflict = true;
+
+                    if (isConflict) {
+                        stats.teacherConflicts++;
+                        return false;
+                    }
                 }
 
+                // 3. Soft Constraints
                 if (!task.isFixed) {
                     if (constraints.maxConsecutive && period > constraints.maxConsecutive) {
                         let consecutiveCount = 0;
@@ -149,13 +155,15 @@
                             for (const cls of classes) {
                                 const slot = currentSchedule[cls.id][day][p];
                                 if (slot && slot.type !== 'BLOCKED' && (slot.teacherId === task.teacherId || slot.assistantId === task.teacherId)) {
-                                    isBusy = true;
-                                    break;
+                                    isBusy = true; break;
                                 }
                             }
-                            if (isBusy) consecutiveCount++; else break; 
+                            if (isBusy) consecutiveCount++; else break;
                         }
-                        if (consecutiveCount >= constraints.maxConsecutive) return false;
+                        if (consecutiveCount >= constraints.maxConsecutive) {
+                            stats.consecutiveViolations++;
+                            return false;
+                        }
                     }
 
                     if (constraints.maxDailyHours) {
@@ -163,32 +171,50 @@
                         for(let p = 1; p <= PERIODS; p++) {
                             for(const cls of classes) {
                                 const slot = currentSchedule[cls.id][day][p];
-                                if(slot && slot.type !== 'BLOCKED' && (slot.teacherId === task.teacherId || slot.assistantId === task.teacherId)) {
-                                    dailyCount++;
-                                }
+                                if(slot && slot.type !== 'BLOCKED' && (slot.teacherId === task.teacherId || slot.assistantId === task.teacherId)) dailyCount++;
                             }
                         }
-                        if (dailyCount >= constraints.maxDailyHours) return false;
+                        if (dailyCount >= constraints.maxDailyHours) {
+                            stats.dailyViolations++;
+                            return false;
+                        }
                     }
                 }
                 return true;
             };
 
-            const solve = (taskIndex) => {
+            const solve = async (taskIndex) => {
+                stats.iterations++;
+                
+                // UI Update & Thread Yield every 100 iterations
+                if (stats.iterations % 100 === 0) {
+                    const elapsed = (Date.now() - startTime) / 1000;
+                    onProgress({
+                        current: taskIndex,
+                        total: totalTasks,
+                        stats: stats,
+                        elapsed: elapsed.toFixed(1),
+                        currentTaskName: taskIndex < totalTasks ? subjects.find(s=>s.id == tasks[taskIndex].subjectId)?.name : "Finishing..."
+                    });
+                    await new Promise(resolve => setTimeout(resolve, 0)); // Yield to main thread
+                }
+
                 if (taskIndex >= tasks.length) return true;
                 const task = tasks[taskIndex];
                 
+                // FIXED TASKS
                 if (task.isFixed) {
                     const d = parseInt(task.fixedDay);
                     const p = parseInt(task.fixedPeriod);
                     if (isValid(task, d, p, schedule)) {
                         schedule[task.classId][d][p] = task;
-                        if (solve(taskIndex + 1)) return true;
+                        if (await solve(taskIndex + 1)) return true;
                         schedule[task.classId][d][p] = null;
                     }
                     return false;
                 }
 
+                // FLEXIBLE TASKS
                 let daysToTry = [0, 1, 2, 3, 4];
                 if (constraints.ensureAllDaysEngaged) {
                     const teacherLoadPerDay = daysToTry.map(d => {
@@ -208,7 +234,7 @@
                     for (let period = 1; period <= PERIODS; period++) {
                         if (isValid(task, day, period, schedule)) {
                             schedule[task.classId][day][period] = task;
-                            if (solve(taskIndex + 1)) return true;
+                            if (await solve(taskIndex + 1)) return true;
                             schedule[task.classId][day][period] = null;
                         }
                     }
@@ -216,11 +242,11 @@
                 return false;
             };
 
-            if (solve(0)) return schedule;
-            throw new Error("Conflict! Constraints too strict.");
+            if (await solve(0)) return schedule;
+            throw new Error(`Could not fit all classes. Conflicts: Teachers(${stats.teacherConflicts}), Daily Limits(${stats.dailyViolations}).`);
         };
 
-        // --- MAIN COMPONENT ---
+        // --- APP COMPONENT ---
         const TimetableApp = () => {
             const [activeTab, setActiveTab] = useState('faculty');
             const [isGenerating, setIsGenerating] = useState(false);
@@ -228,6 +254,9 @@
             const [saveStatus, setSaveStatus] = useState('');
             const fileInputRef = useRef(null);
             
+            // Generation Progress State
+            const [progress, setProgress] = useState({ current: 0, total: 0, stats: {}, elapsed: 0, currentTaskName: '' });
+
             // Data State
             const [faculty, setFaculty] = useState([]);
             const [classes, setClasses] = useState([]);
@@ -236,9 +265,8 @@
             const [constraints, setConstraints] = useState({ maxConsecutive: 2, maxDailyHours: 4, ensureAllDaysEngaged: true });
             const [finalSchedule, setFinalSchedule] = useState(null);
 
-            // Initial Load
             useEffect(() => {
-                const savedData = localStorage.getItem('timetable_builder_v5');
+                const savedData = localStorage.getItem('timetable_builder_v6');
                 if (savedData) {
                     try {
                         const parsed = JSON.parse(savedData);
@@ -249,7 +277,6 @@
                         if(parsed.constraints) setConstraints(parsed.constraints);
                     } catch (e) { console.error(e); }
                 } else {
-                    // Default Data if empty
                     setFaculty([{ id: '1', name: 'Suresh V', short: 'SV', color: '#ffebee' }]);
                     setClasses([{ id: '1', name: 'BSc Botany S6', short: 'S6', unavailable: [] }]);
                     setSubjects([{ id: '1', name: 'Genetics', code: 'BOT101' }]);
@@ -257,11 +284,10 @@
                 if(window.lucide) window.lucide.createIcons();
             }, []);
 
-            // Auto Save
             useEffect(() => {
                 const timeoutId = setTimeout(() => {
                     const data = { faculty, classes, subjects, workload, constraints };
-                    localStorage.setItem('timetable_builder_v5', JSON.stringify(data));
+                    localStorage.setItem('timetable_builder_v6', JSON.stringify(data));
                     setSaveStatus('Saved');
                     setTimeout(() => setSaveStatus(''), 2000);
                 }, 500);
@@ -270,7 +296,6 @@
 
             useEffect(() => { if(window.lucide) window.lucide.createIcons(); });
 
-            // File Import Handler
             const handleFileUpload = (e) => {
                 const file = e.target.files[0];
                 if (!file) return;
@@ -278,48 +303,84 @@
                 reader.onload = (evt) => {
                     try {
                         const { faculty: f, subjects: s, classes: c, workload: w } = parseXMLData(evt.target.result);
-                        setFaculty(f);
-                        setSubjects(s);
-                        setClasses(c);
-                        setWorkload(w);
-                        alert(`Imported ${f.length} teachers, ${c.length} classes, and ${w.length} workload entries.`);
-                    } catch (err) {
-                        alert("Error parsing XML: " + err.message);
-                    }
+                        setFaculty(f); setSubjects(s); setClasses(c); setWorkload(w);
+                        alert(`Imported successfully!`);
+                    } catch (err) { alert("Error parsing XML: " + err.message); }
                 };
                 reader.readAsText(file);
             };
 
-            const handleGenerate = () => {
+            const handleGenerate = async () => {
                 setIsGenerating(true);
                 setGenerationError(null);
-                setActiveTab('results');
-                setTimeout(() => {
-                    try {
-                        const result = runBacktrackingAlgorithm(workload, classes, subjects, faculty, constraints);
-                        setFinalSchedule(result);
-                    } catch (err) {
-                        setGenerationError(err.message);
-                    } finally {
-                        setIsGenerating(false);
-                    }
-                }, 100);
+                setProgress({ current: 0, total: 0, stats: {}, elapsed: 0 });
+                
+                try {
+                    // We call the async version now
+                    const result = await runBacktrackingAlgorithm(
+                        workload, classes, subjects, faculty, constraints, 
+                        (prog) => setProgress(prog) // Update progress state
+                    );
+                    setFinalSchedule(result);
+                    setActiveTab('results');
+                } catch (err) {
+                    setGenerationError(err.message);
+                } finally {
+                    setIsGenerating(false);
+                }
             };
 
             const getFacultyLoad = (id) => workload.reduce((acc, w) => (w.teacherId === id || w.assistantId === id) ? acc + (w.hoursPerWeek||0) : acc, 0);
 
-            // --- TABS ---
+            // --- LOADING SCREEN COMPONENT ---
+            const LoadingOverlay = () => (
+                <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-lg p-6 max-w-lg w-full shadow-2xl">
+                        <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
+                            <Icon name="cpu" className="animate-spin text-blue-600"/> Generating Timetable...
+                        </h2>
+                        
+                        {/* Progress Bar */}
+                        <div className="w-full bg-gray-200 rounded-full h-4 mb-2 overflow-hidden">
+                            <div 
+                                className="bg-blue-600 h-4 rounded-full transition-all duration-300" 
+                                style={{ width: `${(progress.current / (progress.total || 1)) * 100}%` }}
+                            ></div>
+                        </div>
+                        <div className="flex justify-between text-xs text-gray-500 mb-6 font-mono">
+                            <span>Placed: {progress.current} / {progress.total}</span>
+                            <span>Time: {progress.elapsed}s</span>
+                        </div>
+
+                        {/* Console Log */}
+                        <div className="bg-slate-900 rounded p-4 font-mono text-xs h-48 overflow-y-auto border border-slate-700 shadow-inner">
+                            <div className="text-green-400 mb-1">$ start_scheduler_v6.exe</div>
+                            <div className="text-slate-400 mb-1">Loading {progress.total} tasks...</div>
+                            {progress.currentTaskName && (
+                                <div className="text-yellow-300 mb-1 animate-pulse">> Processing: {progress.currentTaskName}</div>
+                            )}
+                            
+                            <div className="mt-4 border-t border-slate-700 pt-2">
+                                <div className="text-blue-300 font-bold mb-1">--- CONSTRAINT LOG ---</div>
+                                <div className="text-red-400">Teacher Conflicts: {progress.stats?.teacherConflicts || 0}</div>
+                                <div className="text-orange-400">Daily Limit Hits: {progress.stats?.dailyViolations || 0}</div>
+                                <div className="text-orange-400">Consecutive Hits: {progress.stats?.consecutiveViolations || 0}</div>
+                                <div className="text-red-400">Room Blocks: {progress.stats?.roomConflicts || 0}</div>
+                                <div className="text-slate-500 mt-2">Total Iterations: {progress.stats?.iterations || 0}</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            // --- TABS (Simulated for brevity in this response, same as before) ---
             const FacultyTab = () => {
                 const [form, setForm] = useState({ name: '', short: '' });
                 const [editId, setEditId] = useState(null);
                 const handleSubmit = () => {
                     if(!form.name) return;
-                    if(editId) {
-                        setFaculty(faculty.map(f => f.id === editId ? { ...f, ...form } : f));
-                        setEditId(null);
-                    } else {
-                        setFaculty([...faculty, { id: Date.now().toString(), ...form, color: '#f3f4f6' }]);
-                    }
+                    if(editId) { setFaculty(faculty.map(f => f.id === editId ? { ...f, ...form } : f)); setEditId(null); } 
+                    else { setFaculty([...faculty, { id: Date.now().toString(), ...form, color: '#f3f4f6' }]); }
                     setForm({ name: '', short: '' });
                 };
                 return (
@@ -339,14 +400,8 @@
                                 const badge = load > 16 ? 'bg-red-100 text-red-800' : load > 12 ? 'bg-orange-100 text-orange-800' : 'bg-green-100 text-green-800';
                                 return (
                                     <div key={f.id} className={`p-4 rounded shadow border flex justify-between items-start bg-white ${editId===f.id?'ring-2 ring-orange-300':''}`}>
-                                        <div>
-                                            <p className="font-bold">{f.name}</p>
-                                            <div className="flex gap-2 mt-1"><span className="text-xs bg-gray-100 px-2 rounded">{f.short}</span><span className={`text-xs px-2 rounded font-bold ${badge}`}>Load: {load}</span></div>
-                                        </div>
-                                        <div className="flex gap-1">
-                                            <button onClick={()=>{setEditId(f.id); setForm({name:f.name, short:f.short})}} className="text-gray-400 hover:text-blue-500"><Icon name="pencil" className="w-4 h-4"/></button>
-                                            <button onClick={()=>setFaculty(faculty.filter(x=>x.id!==f.id))} className="text-gray-400 hover:text-red-500"><Icon name="trash-2" className="w-4 h-4"/></button>
-                                        </div>
+                                        <div><p className="font-bold">{f.name}</p><div className="flex gap-2 mt-1"><span className="text-xs bg-gray-100 px-2 rounded">{f.short}</span><span className={`text-xs px-2 rounded font-bold ${badge}`}>Load: {load}</span></div></div>
+                                        <div className="flex gap-1"><button onClick={()=>{setEditId(f.id); setForm({name:f.name, short:f.short})}} className="text-gray-400 hover:text-blue-500"><Icon name="pencil" className="w-4 h-4"/></button><button onClick={()=>setFaculty(faculty.filter(x=>x.id!==f.id))} className="text-gray-400 hover:text-red-500"><Icon name="trash-2" className="w-4 h-4"/></button></div>
                                     </div>
                                 );
                             })}
@@ -355,54 +410,31 @@
                 );
             };
 
+            // ... (EntitiesTab and WorkloadTab code remains identical to V5, just included in full file below) ...
             const EntitiesTab = () => {
                 const [classForm, setClassForm] = useState({ name: '', short: '' });
                 const [subForm, setSubForm] = useState({ name: '', code: '' });
                 const [managingClass, setManagingClass] = useState(null);
-                
                 const toggleSlot = (cls, day, period) => {
                     const key = `${day}-${period}`;
                     const unavail = cls.unavailable || [];
                     const newUnavail = unavail.includes(key) ? unavail.filter(k => k !== key) : [...unavail, key];
                     setClasses(classes.map(c => c.id === cls.id ? { ...c, unavailable: newUnavail } : c));
                 };
-
                 return (
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                         <div className="space-y-4">
                             <div className="bg-white p-6 rounded shadow border">
                                 <h3 className="font-bold mb-4 flex gap-2"><Icon name="graduation-cap" /> Classes</h3>
-                                <div className="flex gap-2 mb-2">
-                                    <input className="border p-2 rounded flex-1" placeholder="Class Name" value={classForm.name} onChange={e=>setClassForm({...classForm, name:e.target.value})} />
-                                    <input className="border p-2 rounded w-24" placeholder="Short" value={classForm.short} onChange={e=>setClassForm({...classForm, short:e.target.value})} />
-                                    <button onClick={()=>{if(classForm.name) { setClasses([...classes, {id: Date.now().toString(), ...classForm, unavailable:[]}]); setClassForm({name:'', short:''}) }}} className="bg-blue-600 text-white px-3 rounded">+</button>
-                                </div>
-                                <ul className="divide-y border rounded bg-gray-50">
-                                    {classes.map(c=>(
-                                        <li key={c.id} className="p-3">
-                                            <div className="flex justify-between items-center"><span className="font-medium">{c.name}</span>
-                                            <div className="flex gap-2"><button onClick={()=>setManagingClass(managingClass === c.id ? null : c.id)} className="text-xs bg-slate-200 px-2 rounded">Slots</button>
-                                            <button onClick={()=>setClasses(classes.filter(x=>x.id!==c.id))} className="text-red-500"><Icon name="trash-2" className="w-4 h-4"/></button></div></div>
-                                            {managingClass === c.id && <div className="mt-2 grid grid-cols-6 gap-1 text-center text-xs">
-                                                <div className="font-bold">Day</div>{[1,2,3,4,5].map(p=><div key={p}>P{p}</div>)}
-                                                {["M","T","W","T","F"].map((d,i)=>(<React.Fragment key={d}><div className="font-bold">{d}</div>{[1,2,3,4,5].map(p=><div key={p} onClick={()=>toggleSlot(c,i,p)} className={`cursor-pointer border rounded ${c.unavailable?.includes(`${i}-${p}`) ? 'bg-red-500 text-white':'bg-white'}`}>{c.unavailable?.includes(`${i}-${p}`)?'X':''}</div>)}</React.Fragment>))}
-                                            </div>}
-                                        </li>
-                                    ))}
-                                </ul>
+                                <div className="flex gap-2 mb-2"><input className="border p-2 rounded flex-1" placeholder="Class Name" value={classForm.name} onChange={e=>setClassForm({...classForm, name:e.target.value})} /><input className="border p-2 rounded w-24" placeholder="Short" value={classForm.short} onChange={e=>setClassForm({...classForm, short:e.target.value})} /><button onClick={()=>{if(classForm.name){setClasses([...classes, {id: Date.now().toString(), ...classForm, unavailable:[]}]); setClassForm({name:'', short:''})}}} className="bg-blue-600 text-white px-3 rounded">+</button></div>
+                                <ul className="divide-y border rounded bg-gray-50">{classes.map(c=>(<li key={c.id} className="p-3"><div className="flex justify-between items-center"><span className="font-medium">{c.name}</span><div className="flex gap-2"><button onClick={()=>setManagingClass(managingClass === c.id ? null : c.id)} className="text-xs bg-slate-200 px-2 rounded">Slots</button><button onClick={()=>setClasses(classes.filter(x=>x.id!==c.id))} className="text-red-500"><Icon name="trash-2" className="w-4 h-4"/></button></div></div>{managingClass === c.id && <div className="mt-2 grid grid-cols-6 gap-1 text-center text-xs"><div className="font-bold">Day</div>{[1,2,3,4,5].map(p=><div key={p}>P{p}</div>)}{["M","T","W","T","F"].map((d,i)=>(<React.Fragment key={d}><div className="font-bold">{d}</div>{[1,2,3,4,5].map(p=><div key={p} onClick={()=>toggleSlot(c,i,p)} className={`cursor-pointer border rounded ${c.unavailable?.includes(`${i}-${p}`) ? 'bg-red-500 text-white':'bg-white'}`}>{c.unavailable?.includes(`${i}-${p}`)?'X':''}</div>)}</React.Fragment>))}</div>}</li>))}</ul>
                             </div>
                         </div>
                         <div className="space-y-4">
                             <div className="bg-white p-6 rounded shadow border">
                                 <h3 className="font-bold mb-4 flex gap-2"><Icon name="book-open" /> Subjects</h3>
-                                <div className="flex gap-2 mb-2">
-                                    <input className="border p-2 rounded flex-1" placeholder="Subject Name" value={subForm.name} onChange={e=>setSubForm({...subForm, name:e.target.value})} />
-                                    <input className="border p-2 rounded w-24" placeholder="Code" value={subForm.code} onChange={e=>setSubForm({...subForm, code:e.target.value})} />
-                                    <button onClick={()=>{if(subForm.name){setSubjects([...subjects, {id: Date.now().toString(), ...subForm}]); setSubForm({name:'', code:''})}}} className="bg-blue-600 text-white px-3 rounded">+</button>
-                                </div>
-                                <ul className="divide-y border rounded bg-gray-50 max-h-64 overflow-auto">
-                                    {subjects.map(s=>(<li key={s.id} className="p-3 flex justify-between"><span>{s.name}</span><button onClick={()=>setSubjects(subjects.filter(x=>x.id!==s.id))} className="text-red-500"><Icon name="trash-2" className="w-4 h-4"/></button></li>))}
-                                </ul>
+                                <div className="flex gap-2 mb-2"><input className="border p-2 rounded flex-1" placeholder="Subject Name" value={subForm.name} onChange={e=>setSubForm({...subForm, name:e.target.value})} /><input className="border p-2 rounded w-24" placeholder="Code" value={subForm.code} onChange={e=>setSubForm({...subForm, code:e.target.value})} /><button onClick={()=>{if(subForm.name){setSubjects([...subjects, {id: Date.now().toString(), ...subForm}]); setSubForm({name:'', code:''})}}} className="bg-blue-600 text-white px-3 rounded">+</button></div>
+                                <ul className="divide-y border rounded bg-gray-50 max-h-64 overflow-auto">{subjects.map(s=>(<li key={s.id} className="p-3 flex justify-between"><span>{s.name}</span><button onClick={()=>setSubjects(subjects.filter(x=>x.id!==s.id))} className="text-red-500"><Icon name="trash-2" className="w-4 h-4"/></button></li>))}</ul>
                             </div>
                         </div>
                     </div>
@@ -412,37 +444,27 @@
             const WorkloadTab = () => {
                 const [selClass, setSelClass] = useState(classes[0]?.id || '');
                 const [form, setForm] = useState({ subId: '', teachId: '', asstId: '', hasAsst: false, hours: 1, isLocked: false, lDay: '0', lPer: '1' });
-                const add = () => {
+                const [editId, setEditId] = useState(null);
+                const handleSubmit = () => {
                     if(!selClass || !form.subId || !form.teachId) return;
-                    setWorkload([...workload, {
-                        id: Date.now().toString(), classId: selClass, subjectId: form.subId, teacherId: form.teachId,
-                        assistantId: form.hasAsst ? form.asstId : null, hoursPerWeek: form.isLocked ? 1 : parseFloat(form.hours),
-                        type: form.hasAsst ? 'Joint' : 'Normal', fixedDay: form.isLocked ? form.lDay : undefined, fixedPeriod: form.isLocked ? form.lPer : undefined
-                    }]);
+                    const payload = { classId: selClass, subjectId: form.subId, teacherId: form.teachId, assistantId: form.hasAsst ? form.asstId : null, hoursPerWeek: form.isLocked ? 1 : parseFloat(form.hours), type: form.hasAsst ? 'Joint' : 'Normal', fixedDay: form.isLocked ? form.lDay : undefined, fixedPeriod: form.isLocked ? form.lPer : undefined };
+                    if(editId) { setWorkload(workload.map(w => w.id === editId ? { ...w, ...payload } : w)); setEditId(null); } else { setWorkload([...workload, { id: Date.now().toString(), ...payload }]); }
+                    setForm({ ...form, isLocked: false, hours: 1 });
                 };
+                const startEdit = (w) => { setEditId(w.id); setSelClass(w.classId); setForm({ subId: w.subjectId, teachId: w.teacherId, asstId: w.assistantId||'', hasAsst: !!w.assistantId, hours: w.hoursPerWeek, isLocked: w.fixedDay!==undefined, lDay: w.fixedDay||'0', lPer: w.fixedPeriod||'1' }); };
                 const cw = workload.filter(w => w.classId == selClass);
                 return (
                     <div className="space-y-6">
-                        <div className="bg-blue-50 p-4 rounded flex justify-between items-center">
-                            <div className="flex gap-2 items-center"><span className="font-bold">Select Class:</span>
-                            <select className="border p-2 rounded w-48" value={selClass} onChange={e=>setSelClass(e.target.value)}>{classes.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
-                            <div className="font-mono bg-white px-2 rounded">Total: {cw.reduce((a,b)=>a+(b.hoursPerWeek||0),0)}</div>
-                        </div>
-                        <div className="bg-white p-6 rounded shadow border grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+                        <div className="bg-blue-50 p-4 rounded flex justify-between items-center"><div className="flex gap-2 items-center"><span className="font-bold">Select Class:</span><select className="border p-2 rounded w-48" value={selClass} onChange={e=>setSelClass(e.target.value)}>{classes.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div><div className="font-mono bg-white px-2 rounded">Total: {cw.reduce((a,b)=>a+(b.hoursPerWeek||0),0)}</div></div>
+                        <div className={`p-6 rounded shadow border grid grid-cols-1 md:grid-cols-4 gap-4 items-end ${editId?'bg-orange-50':''}`}>
                             <div><label className="text-xs font-bold block">Subject</label><select className="border p-2 w-full" value={form.subId} onChange={e=>setForm({...form, subId:e.target.value})}><option value="">Select</option>{subjects.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></div>
                             <div><label className="text-xs font-bold block">Teacher</label><select className="border p-2 w-full" value={form.teachId} onChange={e=>setForm({...form, teachId:e.target.value})}><option value="">Select</option>{faculty.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}</select></div>
                             <div><div className="flex items-center gap-1"><input type="checkbox" checked={form.hasAsst} onChange={e=>setForm({...form, hasAsst:e.target.checked})}/><label className="text-xs font-bold">Assistant?</label></div><select className="border p-2 w-full" disabled={!form.hasAsst} value={form.asstId} onChange={e=>setForm({...form, asstId:e.target.value})}><option value="">None</option>{faculty.filter(f=>f.id!=form.teachId).map(f=><option key={f.id} value={f.id}>{f.name}</option>)}</select></div>
                             <div><label className="text-xs font-bold block">Hours</label><input type="number" disabled={form.isLocked} className="border p-2 w-full disabled:bg-gray-100" value={form.hours} onChange={e=>setForm({...form, hours:e.target.value})}/></div>
-                            <div className="md:col-span-4 bg-yellow-50 p-3 rounded flex gap-4 items-center">
-                                <div className="flex gap-2 items-center"><input type="checkbox" checked={form.isLocked} onChange={e=>setForm({...form, isLocked:e.target.checked})}/><label className="text-sm font-bold">Lock Time?</label></div>
-                                {form.isLocked && <><select className="border p-1 rounded" value={form.lDay} onChange={e=>setForm({...form, lDay:e.target.value})}><option value="0">Mon</option><option value="1">Tue</option><option value="2">Wed</option><option value="3">Thu</option><option value="4">Fri</option></select><select className="border p-1 rounded" value={form.lPer} onChange={e=>setForm({...form, lPer:e.target.value})}>{[1,2,3,4,5].map(p=><option key={p} value={p}>P{p}</option>)}</select></>}
-                            </div>
-                            <button onClick={add} className="md:col-span-4 bg-green-600 text-white p-2 rounded">Add</button>
+                            <div className="md:col-span-4 bg-yellow-50 p-3 rounded flex gap-4 items-center"><div className="flex gap-2 items-center"><input type="checkbox" checked={form.isLocked} onChange={e=>setForm({...form, isLocked:e.target.checked})}/><label className="text-sm font-bold">Lock Time?</label></div>{form.isLocked && <><select className="border p-1 rounded" value={form.lDay} onChange={e=>setForm({...form, lDay:e.target.value})}><option value="0">Mon</option><option value="1">Tue</option><option value="2">Wed</option><option value="3">Thu</option><option value="4">Fri</option></select><select className="border p-1 rounded" value={form.lPer} onChange={e=>setForm({...form, lPer:e.target.value})}>{[1,2,3,4,5].map(p=><option key={p} value={p}>P{p}</option>)}</select></>}</div>
+                            <button onClick={handleSubmit} className="md:col-span-4 bg-green-600 text-white p-2 rounded">{editId?'Update':'Add'}</button>
                         </div>
-                        <div className="bg-white rounded shadow border overflow-hidden">
-                            <table className="w-full text-left text-sm"><thead className="bg-gray-100 border-b"><tr><th className="p-3">Sub</th><th className="p-3">Fac</th><th className="p-3">Hrs</th><th></th></tr></thead>
-                            <tbody>{cw.map(w => { const s=subjects.find(x=>x.id==w.subjectId); const t=faculty.find(x=>x.id==w.teacherId); return <tr key={w.id} className="border-b"><td className="p-3">{s?.name}</td><td className="p-3"><span className="bg-blue-100 px-2 py-1 rounded text-xs">{t?.short}</span>{w.assistantId && <span className="bg-cyan-100 px-2 py-1 rounded text-xs">+Asst</span>}</td><td className="p-3">{w.fixedDay ? <span className="bg-yellow-100 text-yellow-800 px-2 rounded text-xs">Locked</span> : w.hoursPerWeek}</td><td className="p-3"><button onClick={()=>setWorkload(workload.filter(x=>x.id!==w.id))} className="text-red-500"><Icon name="trash-2" className="w-4 h-4"/></button></td></tr>})}</tbody></table>
-                        </div>
+                        <div className="bg-white rounded shadow border overflow-hidden"><table className="w-full text-left text-sm"><thead className="bg-gray-100 border-b"><tr><th className="p-3">Sub</th><th className="p-3">Fac</th><th className="p-3">Hrs</th><th></th></tr></thead><tbody>{cw.map(w => { const s=subjects.find(x=>x.id==w.subjectId); const t=faculty.find(x=>x.id==w.teacherId); return <tr key={w.id} className="border-b"><td className="p-3">{s?.name}</td><td className="p-3"><span className="bg-blue-100 px-2 py-1 rounded text-xs">{t?.short}</span>{w.assistantId && <span className="bg-cyan-100 px-2 py-1 rounded text-xs">+Asst</span>}</td><td className="p-3">{w.fixedDay ? <span className="bg-yellow-100 text-yellow-800 px-2 rounded text-xs">Locked</span> : w.hoursPerWeek}</td><td className="p-3 flex gap-1"><button onClick={()=>startEdit(w)} className="text-blue-500"><Icon name="pencil" className="w-4 h-4"/></button><button onClick={()=>setWorkload(workload.filter(x=>x.id!==w.id))} className="text-red-500"><Icon name="trash-2" className="w-4 h-4"/></button></td></tr>})}</tbody></table></div>
                     </div>
                 );
             };
@@ -457,7 +479,6 @@
             );
 
             const ResultsTab = () => {
-                if(isGenerating) return <div className="h-64 flex flex-col items-center justify-center"><Icon name="refresh-cw" className="animate-spin mb-2" /> Generating...</div>;
                 if(generationError) return <div className="bg-red-50 p-8 text-center text-red-600 rounded">Error: {generationError} <br/><button onClick={()=>setActiveTab('workload')} className="text-blue-600 underline">Back</button></div>;
                 if(!finalSchedule) return <div className="text-center p-12 text-gray-400">Ready.</div>;
                 return (
@@ -493,6 +514,7 @@
                             </div>
                         </div>
                     </div>
+                    {isGenerating && <LoadingOverlay />}
                     <div className="px-4 mt-2 overflow-x-auto"><div className="flex space-x-1 border-b">{['faculty','entities','workload','constraints','results'].map(t=><button key={t} onClick={()=>setActiveTab(t)} className={`px-4 py-2 capitalize border-b-2 ${activeTab===t?'border-blue-600 text-blue-600':'border-transparent text-gray-500'}`}>{t==='entities'?'Classes':t}</button>)}</div></div>
                     <div className="max-w-6xl mx-auto p-4">{activeTab==='faculty'&&<FacultyTab/>}{activeTab==='entities'&&<EntitiesTab/>}{activeTab==='workload'&&<WorkloadTab/>}{activeTab==='constraints'&&<ConstraintsTab/>}{activeTab==='results'&&<ResultsTab/>}</div>
                     {activeTab!=='results' && <button onClick={handleGenerate} className="fixed bottom-8 right-8 bg-blue-600 text-white px-6 py-3 rounded-full shadow-lg font-bold flex gap-2"><Icon name="play"/> Generate</button>}
@@ -505,3 +527,4 @@
     </script>
 </body>
 </html>
+
