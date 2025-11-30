@@ -26,7 +26,9 @@ export const runBacktrackingAlgorithm = (workload, classes, subjects, faculty, c
 
   // Heuristic Sort: Schedule hardest tasks first
   tasks.sort((a, b) => {
+    // Joint classes are harder to place
     if (a.type === 'Joint' && b.type !== 'Joint') return -1;
+    if (a.type !== 'Joint' && b.type === 'Joint') return 1;
     return 0;
   });
 
@@ -70,19 +72,23 @@ const isValid = (task, day, period, currentSchedule, classes, constraints) => {
   for (const cls of classes) {
     const slot = currentSchedule[cls.id][day][period];
     if (slot) {
-      // Check Primary Teacher
+      // Check Primary Teacher availability
       if (slot.teacherId === task.teacherId || slot.assistantId === task.teacherId) return false;
       
-      // Check Assistant Teacher (if this task has one)
+      // Check Assistant Teacher availability (if this task has one)
       if (task.assistantId) {
         if (slot.teacherId === task.assistantId || slot.assistantId === task.assistantId) return false;
       }
+      
+      // Check if existing slot's assistant is our primary teacher
+      if (slot.assistantId === task.teacherId) return false;
     }
   }
 
   // Rule 3: Max Consecutive Hours
   if (constraints.maxConsecutive && period > constraints.maxConsecutive) {
     let consecutiveCount = 0;
+    // Check backwards
     for (let p = period - 1; p >= 1; p--) {
       let isTeacherBusyInThisSlot = false;
       for (const cls of classes) {
