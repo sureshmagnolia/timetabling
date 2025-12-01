@@ -73,23 +73,24 @@
         // --- ASYNC LOGIC ENGINE ---
         const generateId = () => Math.floor(Math.random() * 100000);
 
-        // NOTE: This function is now ASYNC and accepts an onProgress callback
+        // NOTE: This is the "Grandmaster" Logic Engine v2.0
         const runBacktrackingAlgorithm = async (workload, classes, subjects, faculty, constraints, onProgress) => {
             const DAYS = 5; 
             const PERIODS = 5; 
             const schedule = {}; 
             
+            // 1. FAST LOOKUP BOARDS (The "Chess Board")
+            // Tracks teacher availability instantly without looping through all classes
+            const teacherBusy = {}; 
+            faculty.forEach(f => {
+                teacherBusy[f.id] = Array(DAYS).fill(null).map(() => Array(PERIODS + 1).fill(false));
+            });
+
             // Stats Tracking
-            const stats = { 
-                iterations: 0, 
-                roomConflicts: 0, 
-                teacherConflicts: 0, 
-                consecutiveViolations: 0, 
-                dailyViolations: 0 
-            };
+            const stats = { iterations: 0, conflicts: 0, backtracks: 0, depth: 0 };
             const startTime = Date.now();
 
-            // Initialize Grid
+            // Initialize Class Grid
             classes.forEach(cls => {
                 schedule[cls.id] = Array(DAYS).fill(null).map(() => Array(PERIODS + 1).fill(null));
                 if (cls.unavailable) {
@@ -100,168 +101,165 @@
                 }
             });
 
-            // Prepare Tasks
+            // 2. STRATEGIC OPENING (Heuristic Sorting)
+            // Calculate "Difficulty Score" for each teacher
+            const teacherLoad = {};
+            workload.forEach(w => {
+                teacherLoad[w.teacherId] = (teacherLoad[w.teacherId] || 0) + (w.hoursPerWeek || 0);
+                if(w.assistantId) teacherLoad[w.assistantId] = (teacherLoad[w.assistantId] || 0) + (w.hoursPerWeek || 0);
+            });
+
             let tasks = [];
             workload.forEach(w => {
-                if (w.fixedDay !== undefined && w.fixedDay !== "" && w.fixedPeriod) {
-                    tasks.push({ ...w, uniqueId: generateId(), isFixed: true });
-                } else {
-                    for (let i = 0; i < w.hoursPerWeek; i++) {
-                        tasks.push({ ...w, uniqueId: generateId(), isFixed: false });
-                    }
+                const count = w.fixedDay ? 1 : w.hoursPerWeek;
+                for (let i = 0; i < count; i++) {
+                    tasks.push({ ...w, uniqueId: generateId(), isFixed: !!w.fixedDay });
                 }
             });
 
-           // --- NEW: Calculate Teacher Workloads for Heuristics ---
-            const teacherLoads = {};
-            workload.forEach(w => {
-                 teacherLoads[w.teacherId] = (teacherLoads[w.teacherId] || 0) + (w.hoursPerWeek || 0);
-            });
-
-            // --- CHANGED: Improved Sorting Strategy ---
-            // Order: Fixed Tasks -> Joint Classes -> Busiest Teachers -> Rest
+            // Sort: Fixed -> Joint -> Busiest Teachers -> Rest
             tasks.sort((a, b) => {
-                // 1. Fixed tasks always go first
                 if (a.isFixed !== b.isFixed) return a.isFixed ? -1 : 1;
-                
-                // 2. Joint classes are harder to fit, so place them next
                 if (a.type === 'Joint' && b.type !== 'Joint') return -1;
                 if (b.type === 'Joint' && a.type !== 'Joint') return 1;
-                
-                // 3. CRITICAL FIX: Prioritize teachers with the highest workload
-                // (This prevents the "indefinite loop" by fitting bottlenecks early)
-                const loadA = teacherLoads[a.teacherId] || 0;
-                const loadB = teacherLoads[b.teacherId] || 0;
-                if (loadA !== loadB) return loadB - loadA; // Descending (Highest load first)
-                
-                return 0;
+                // Tie-breaker: Whichever teacher has more total work goes first
+                return (teacherLoad[b.teacherId]||0) - (teacherLoad[a.teacherId]||0);
             });
 
             const totalTasks = tasks.length;
+            
+            // Track remaining hours dynamically for "Look-Ahead"
+            const remainingHours = { ...teacherLoad };
 
-            const isValid = (task, day, period, currentSchedule) => {
-                // 1. Room Check
-                if (currentSchedule[task.classId][day][period] !== null) {
-                    stats.roomConflicts++;
-                    return false;
-                }
+            // 3. THE "MOVE VALIDATOR"
+            const isValid = (task, day, period) => {
+                // A. Room Check
+                if (schedule[task.classId][day][period] !== null) return false;
 
-                // 2. Teacher Conflict
-                for (const cls of classes) {
-                    const slot = currentSchedule[cls.id][day][period];
-                    if (!slot || slot.type === 'BLOCKED') continue;
+                // B. Teacher Check (Using Fast Lookup)
+                if (teacherBusy[task.teacherId][day][period]) return false;
+                if (task.assistantId && teacherBusy[task.assistantId][day][period]) return false;
 
-                    let isConflict = false;
-                    if (slot.teacherId === task.teacherId || slot.assistantId === task.teacherId) isConflict = true;
-                    if (task.assistantId) {
-                        if (slot.teacherId === task.assistantId || slot.assistantId === task.assistantId) isConflict = true;
-                    }
-                    if (slot.assistantId === task.teacherId) isConflict = true;
-
-                    if (isConflict) {
-                        stats.teacherConflicts++;
-                        return false;
-                    }
-                }
-
-                // 3. Soft Constraints
+                // C. Soft Constraints (Only check if not fixed)
                 if (!task.isFixed) {
-                    if (constraints.maxConsecutive && period > constraints.maxConsecutive) {
-                        let consecutiveCount = 0;
-                        for (let p = period - 1; p >= 1; p--) {
-                            let isBusy = false;
-                            for (const cls of classes) {
-                                const slot = currentSchedule[cls.id][day][p];
-                                if (slot && slot.type !== 'BLOCKED' && (slot.teacherId === task.teacherId || slot.assistantId === task.teacherId)) {
-                                    isBusy = true; break;
-                                }
-                            }
-                            if (isBusy) consecutiveCount++; else break;
-                        }
-                        if (consecutiveCount >= constraints.maxConsecutive) {
-                            stats.consecutiveViolations++;
-                            return false;
-                        }
+                    // Max Daily Limit
+                    let dailyCount = 0;
+                    for(let p=1; p<=PERIODS; p++) {
+                        if(teacherBusy[task.teacherId][day][p]) dailyCount++;
                     }
+                    if (dailyCount >= constraints.maxDailyHours) return false;
 
-                    if (constraints.maxDailyHours) {
-                        let dailyCount = 0;
-                        for(let p = 1; p <= PERIODS; p++) {
-                            for(const cls of classes) {
-                                const slot = currentSchedule[cls.id][day][p];
-                                if(slot && slot.type !== 'BLOCKED' && (slot.teacherId === task.teacherId || slot.assistantId === task.teacherId)) dailyCount++;
-                            }
+                    // Consecutive Limit
+                    if (period > 1 && teacherBusy[task.teacherId][day][period-1]) {
+                        // Simple check: if already 2 in a row, don't add 3rd
+                        let streak = 0;
+                        for(let p=period-1; p>=1; p--) {
+                            if(teacherBusy[task.teacherId][day][p]) streak++; else break;
                         }
-                        if (dailyCount >= constraints.maxDailyHours) {
-                            stats.dailyViolations++;
-                            return false;
-                        }
+                        if(streak >= constraints.maxConsecutive) return false;
                     }
                 }
                 return true;
             };
 
+            // 4. FORWARD CHECKING (The "Chess Engine")
+            // "If I play this move, do I still have enough squares left for my other pieces?"
+            const isFutureViable = (teacherId, taskClassId) => {
+                const needed = remainingHours[teacherId];
+                if (needed <= 0) return true;
+
+                let possibleSlots = 0;
+                // Scan the board to count viable slots for this teacher
+                for(let d=0; d<DAYS; d++) {
+                    for(let p=1; p<=PERIODS; p++) {
+                        // Slot must be free for BOTH the Teacher AND the specific Class
+                        if (!teacherBusy[teacherId][d][p] && schedule[taskClassId][d][p] === null) {
+                            possibleSlots++;
+                        }
+                    }
+                }
+                // If we need 5 hours but only have 4 valid slots left -> CHECKMATE DETECTED
+                return possibleSlots >= needed;
+            };
+
             const solve = async (taskIndex) => {
                 stats.iterations++;
-                
-                // UI Update & Thread Yield every 100 iterations
-                if (stats.iterations % 100 === 0) {
+
+                // Anti-Freeze & UI Update
+                if (stats.iterations % 200 === 0) {
+                    if(stats.iterations > 300000) throw new Error("Optimization Timed Out. Constraints are too tight.");
                     const elapsed = (Date.now() - startTime) / 1000;
                     onProgress({
                         current: taskIndex,
                         total: totalTasks,
-                        stats: stats,
+                        stats: { ...stats, conficts: stats.backtracks }, // Show backtracks as conflicts
                         elapsed: elapsed.toFixed(1),
-                        currentTaskName: taskIndex < totalTasks ? subjects.find(s=>s.id == tasks[taskIndex].subjectId)?.name : "Finishing..."
+                        currentTaskName: tasks[taskIndex] ? (subjects.find(s=>s.id == tasks[taskIndex].subjectId)?.name || 'Processing') : "Finishing..."
                     });
-                    await new Promise(resolve => setTimeout(resolve, 0)); // Yield to main thread
+                    await new Promise(r => setTimeout(r, 0));
                 }
 
                 if (taskIndex >= tasks.length) return true;
-                const task = tasks[taskIndex];
                 
-                // FIXED TASKS
+                const task = tasks[taskIndex];
+                const tId = task.teacherId;
+                const aId = task.assistantId;
+
+                // Helper to Place/Remove pieces
+                const toggle = (d, p, val) => {
+                    schedule[task.classId][d][p] = val ? task : null;
+                    teacherBusy[tId][d][p] = val;
+                    if(aId) teacherBusy[aId][d][p] = val;
+                    // Update "Remaining Hours" for Look-Ahead
+                    if (val) remainingHours[tId]--; else remainingHours[tId]++;
+                };
+
+                // FIXED TASK HANDLING
                 if (task.isFixed) {
                     const d = parseInt(task.fixedDay);
                     const p = parseInt(task.fixedPeriod);
-                    if (isValid(task, d, p, schedule)) {
-                        schedule[task.classId][d][p] = task;
+                    if (isValid(task, d, p)) {
+                        toggle(d, p, true);
                         if (await solve(taskIndex + 1)) return true;
-                        schedule[task.classId][d][p] = null;
+                        toggle(d, p, false);
                     }
                     return false;
                 }
 
-                // FLEXIBLE TASKS
-                let daysToTry = [0, 1, 2, 3, 4];
-                if (constraints.ensureAllDaysEngaged) {
-                    const teacherLoadPerDay = daysToTry.map(d => {
-                        let count = 0;
-                        for(const cls of classes) {
-                            for(let p = 1; p <= PERIODS; p++) {
-                                const s = schedule[cls.id][d][p];
-                                if (s && s.type !== 'BLOCKED' && (s.teacherId === task.teacherId || s.assistantId === task.teacherId)) count++;
-                            }
-                        }
-                        return { day: d, count };
-                    });
-                    daysToTry = teacherLoadPerDay.sort((a,b) => a.count - b.count).map(x => x.day);
-                }
+                // FLEXIBLE TASK HANDLING
+                // Smart Move: Try days where this teacher is LEAST busy first (Spread load)
+                const bestDays = [0,1,2,3,4].sort((a,b) => {
+                    const loadA = teacherBusy[tId][a].filter(Boolean).length;
+                    const loadB = teacherBusy[tId][b].filter(Boolean).length;
+                    return loadA - loadB;
+                });
 
-                for (let day of daysToTry) {
+                for (let day of bestDays) {
                     for (let period = 1; period <= PERIODS; period++) {
-                        if (isValid(task, day, period, schedule)) {
-                            schedule[task.classId][day][period] = task;
-                            if (await solve(taskIndex + 1)) return true;
-                            schedule[task.classId][day][period] = null;
+                        if (isValid(task, day, period)) {
+                            
+                            // MAKE THE MOVE
+                            toggle(day, period, true);
+
+                            // --- INTELLIGENCE CHECK ---
+                            // Before proceeding, check if this move killed our future chances
+                            if (isFutureViable(tId, task.classId)) {
+                                if (await solve(taskIndex + 1)) return true;
+                            } else {
+                                stats.backtracks++; // Track how many "bad moves" we avoided
+                            }
+
+                            // BACKTRACK (Undo move)
+                            toggle(day, period, false);
                         }
                     }
                 }
+                
                 return false;
             };
 
             if (await solve(0)) return schedule;
-            throw new Error(`Could not fit all classes. Conflicts: Teachers(${stats.teacherConflicts}), Daily Limits(${stats.dailyViolations}).`);
+            throw new Error(`Could not fit all classes. (Backtracks: ${stats.backtracks})`);
         };
 
         // --- APP COMPONENT ---
