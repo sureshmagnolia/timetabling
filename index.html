@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Timetable Architect V2.3</title>
+    <title>Timetable Architect V2.3 (Anti-Freeze)</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     
@@ -21,7 +21,6 @@
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
         }
-        .console-line { font-family: 'Courier New', Courier, monospace; }
     </style>
 </head>
 <body class="bg-gray-50 text-slate-800 font-sans">
@@ -69,7 +68,7 @@
         // --- HELPER ---
         const generateId = () => Math.floor(Math.random() * 100000);
 
-       // --- LOGIC ENGINE v4.0 (Anti-Freeze & Mobile Optimized) ---
+        // --- LOGIC ENGINE v4.1 (Anti-Freeze & Time Throttled) ---
         const runBacktrackingAlgorithm = async (workload, classes, subjects, faculty, constraints, subjectLocks, onProgress) => {
             const DAYS = 5; 
             const PERIODS = 5; 
@@ -80,19 +79,14 @@
             faculty.forEach(f => teacherBusy[f.id] = Array(DAYS).fill(null).map(() => Array(PERIODS + 1).fill(false)));
 
             const stats = { 
-                iterations: 0, 
-                backtracks: 0,
-                teacherConflicts: 0,
-                roomConflicts: 0,
-                dailyLimit: 0,
-                consecutiveLimit: 0,
-                lockConflicts: 0
+                iterations: 0, backtracks: 0, teacherConflicts: 0, roomConflicts: 0,
+                dailyLimit: 0, consecutiveLimit: 0, lockConflicts: 0
             };
             
             const startTime = Date.now();
-            let lastUIUpdate = startTime; // TRACKER FOR UI THROTTLING
+            let lastUIUpdate = startTime;
 
-            // Initialize Grid
+            // Initialize Grid & Handle Blocked Slots
             classes.forEach(cls => {
                 schedule[cls.id] = Array(DAYS).fill(null).map(() => Array(PERIODS + 1).fill(null));
                 if (cls.unavailable) {
@@ -118,23 +112,18 @@
                 const isALocked = subjectLocks[`${a.classId}-Any-Any`] === a.subjectId; 
                 const isBLocked = subjectLocks[`${b.classId}-Any-Any`] === b.subjectId;
                 if (isALocked !== isBLocked) return isALocked ? -1 : 1;
-                if (a.type === 'Joint' && b.type !== 'Joint') return -1;
-                if (b.type === 'Joint' && a.type !== 'Joint') return 1;
                 return (teacherLoad[b.teacherId]||0) - (teacherLoad[a.teacherId]||0);
             });
 
             const isValid = (task, day, period) => {
-                // A. Basic Conflicts
                 if (schedule[task.classId][day][period] !== null) { stats.roomConflicts++; return false; }
                 if (teacherBusy[task.teacherId][day][period]) { stats.teacherConflicts++; return false; }
                 if (task.assistantId && teacherBusy[task.assistantId][day][period]) { stats.teacherConflicts++; return false; }
 
-                // B. Lock Check
                 const lockKey = `${task.classId}-${day}-${period}`;
                 const lockedSubjectId = subjectLocks[lockKey];
                 if (lockedSubjectId && lockedSubjectId !== task.subjectId) { stats.lockConflicts++; return false; }
 
-                // C. Soft Constraints
                 if (!task.isFixed && !lockedSubjectId) {
                     let dailyCount = 0;
                     for(let p=1; p<=PERIODS; p++) if(teacherBusy[task.teacherId][day][p]) dailyCount++;
@@ -152,25 +141,19 @@
             const solve = async (taskIndex) => {
                 stats.iterations++;
                 
-                // --- ANTI-FREEZE MECHANISM ---
-                // Only update UI every 100ms, regardless of how fast calculations are running
+                // ANTI-FREEZE: Only update UI every 100ms
                 const now = Date.now();
                 if (now - lastUIUpdate > 100) { 
                     lastUIUpdate = now;
-                    
-                    // STOP if taking too long (30 seconds max)
-                    if (now - startTime > 30000) return false; 
+                    // Stop after 45 seconds to prevent infinite freezing
+                    if (now - startTime > 45000) return false; 
                     
                     onProgress({ 
-                        current: taskIndex, 
-                        total: tasks.length, 
-                        stats, 
+                        current: taskIndex, total: tasks.length, stats, 
                         elapsed: ((now - startTime) / 1000).toFixed(1), 
                         currentTaskName: tasks[taskIndex] ? subjects.find(s=>s.id === tasks[taskIndex].subjectId)?.name : "Finishing..." 
                     });
-                    
-                    // Yield control to browser
-                    await new Promise(r => setTimeout(r, 0));
+                    await new Promise(r => setTimeout(r, 0)); // Yield to browser
                 }
 
                 if (taskIndex >= tasks.length) return true;
@@ -230,10 +213,8 @@
             const [saveStatus, setSaveStatus] = useState('');
             const fileInputRef = useRef(null);
             
-            // Generation Progress State
             const [progress, setProgress] = useState({ current: 0, total: 0, stats: {}, elapsed: 0, currentTaskName: '' });
 
-            // Data State
             const [faculty, setFaculty] = useState([]);
             const [classes, setClasses] = useState([]);
             const [subjects, setSubjects] = useState([]);
@@ -241,12 +222,10 @@
             const [constraints, setConstraints] = useState({ maxConsecutive: 2, maxDailyHours: 4, ensureAllDaysEngaged: true });
             const [finalSchedule, setFinalSchedule] = useState(null);
 
-            // --- VALIDATION FUNCTION ---
             const checkPreConditions = () => {
                 const errors = [];
                 const teacherMap = {}; 
                 workload.forEach(w => {
-                    // Check Fixed Tasks
                     if (w.fixedDay !== undefined && w.fixedPeriod && w.fixedDay !== "") {
                         const key = `${w.teacherId}-${w.fixedDay}-${w.fixedPeriod}`;
                         const className = classes.find(c => c.id === w.classId)?.name;
@@ -255,7 +234,6 @@
                             errors.push(`CONFLICT: ${tName} is double-booked in ${teacherMap[key]} and ${className} (Day ${parseInt(w.fixedDay)+1} P${w.fixedPeriod})`);
                         } else teacherMap[key] = className;
                     }
-                    // Check Overload
                     const load = workload.reduce((acc, curr) => (curr.teacherId === w.teacherId ? acc + (curr.hoursPerWeek||0) : acc), 0);
                     if (load > 25 && !errors.some(e => e.includes(w.teacherId))) {
                         errors.push(`OVERLOAD: Teacher ${faculty.find(f=>f.id===w.teacherId)?.name} has ${load} hrs (Max 25).`);
@@ -311,7 +289,6 @@
             };
 
             const handleGenerate = async () => {
-                // 1. Safety Check
                 const conflicts = checkPreConditions();
                 if (conflicts.length > 0) {
                     alert("❌ Please resolve conflicts in Workload tab first:\n" + conflicts.join("\n"));
@@ -323,7 +300,6 @@
                 setActiveTab('results'); 
 
                 try {
-                    // 2. Run Algorithm with Subject Locks
                     const { success, schedule, stats } = await runBacktrackingAlgorithm(
                         workload, classes, subjects, faculty, constraints, subjectLocks, 
                         (prog) => setProgress(prog)
@@ -332,7 +308,7 @@
                     setFinalSchedule(schedule);
                     
                     if (!success) {
-                        alert(`Optimization Paused.\n\nShowing partial results. You can now:\n1. Click empty cells to LOCK subjects.\n2. Click 'Resume' to finish.`);
+                        alert(`Optimization Paused safely to prevent browser freeze.\n\nShowing partial results. You can now:\n1. Click empty cells to LOCK subjects or BLOCK slots.\n2. Click 'Resume' to finish remaining.`);
                     }
                 } catch (err) {
                     console.error(err);
@@ -351,50 +327,30 @@
                         <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
                             <Icon name="cpu" className="animate-spin text-blue-600"/> Generating...
                         </h2>
-                        
-                        {/* Progress Bar */}
                         <div className="w-full bg-gray-200 rounded-full h-4 mb-2 overflow-hidden">
-                            <div 
-                                className="bg-blue-600 h-4 rounded-full transition-all duration-300" 
-                                style={{ width: `${(progress.current / (progress.total || 1)) * 100}%` }}
-                            ></div>
+                            <div className="bg-blue-600 h-4 rounded-full transition-all duration-300" style={{ width: `${(progress.current / (progress.total || 1)) * 100}%` }}></div>
                         </div>
                         <div className="flex justify-between text-xs text-gray-500 mb-6 font-mono">
                             <span>Placed: {progress.current} / {progress.total}</span>
                             <span>Time: {progress.elapsed}s</span>
                         </div>
-
-                        {/* Console Log */}
                         <div className="bg-slate-900 rounded p-4 font-mono text-xs h-48 overflow-y-auto border border-slate-700 shadow-inner">
-                            <div className="text-green-400 mb-1">$ start_scheduler_v3.1.exe</div>
+                            <div className="text-green-400 mb-1">$ start_engine_v4.1.exe</div>
                             <div className="text-slate-400 mb-1">Loading {progress.total} tasks...</div>
-                            {progress.currentTaskName && (
-                                <div className="text-yellow-300 mb-1 animate-pulse">> Processing: {progress.currentTaskName}</div>
-                            )}
-                            
+                            {progress.currentTaskName && (<div className="text-yellow-300 mb-1 animate-pulse">> Processing: {progress.currentTaskName}</div>)}
                             <div className="mt-4 border-t border-slate-700 pt-2 grid grid-cols-2 gap-x-4">
                                 <div className="text-blue-300 font-bold mb-1 col-span-2">--- LIVE METRICS ---</div>
-                                
-                                <div className="text-red-400">Teacher Busy:</div>
-                                <div className="text-right text-red-200">{progress.stats?.teacherConflicts || 0}</div>
-
-                                <div className="text-red-400">Room Taken:</div>
-                                <div className="text-right text-red-200">{progress.stats?.roomConflicts || 0}</div>
-
-                                <div className="text-orange-400">Daily Limit:</div>
-                                <div className="text-right text-orange-200">{progress.stats?.dailyLimit || 0}</div>
-
-                                <div className="text-purple-400">Lock Clash:</div>
-                                <div className="text-right text-purple-200">{progress.stats?.lockConflicts || 0}</div>
-                                
-                                <div className="text-slate-500 mt-2 col-span-2 border-t border-slate-800 pt-1">
-                                    Total Checks: {progress.stats?.iterations?.toLocaleString() || 0}
-                                </div>
+                                <div className="text-red-400">Teacher Busy:</div><div className="text-right text-red-200">{progress.stats?.teacherConflicts || 0}</div>
+                                <div className="text-red-400">Room Taken:</div><div className="text-right text-red-200">{progress.stats?.roomConflicts || 0}</div>
+                                <div className="text-orange-400">Daily Limit:</div><div className="text-right text-orange-200">{progress.stats?.dailyLimit || 0}</div>
+                                <div className="text-purple-400">Lock Clash:</div><div className="text-right text-purple-200">{progress.stats?.lockConflicts || 0}</div>
+                                <div className="text-slate-500 mt-2 col-span-2 border-t border-slate-800 pt-1">Total Checks: {progress.stats?.iterations?.toLocaleString() || 0}</div>
                             </div>
                         </div>
                     </div>
                 </div>
             );
+
             const FacultyTab = () => {
                 const [form, setForm] = useState({ name: '', short: '' });
                 const [editId, setEditId] = useState(null);
@@ -434,20 +390,13 @@
             const EntitiesTab = () => {
                 const [classForm, setClassForm] = useState({ name: '', short: '' });
                 const [subForm, setSubForm] = useState({ name: '', code: '' });
-                const [managingClass, setManagingClass] = useState(null);
-                const toggleSlot = (cls, day, period) => {
-                    const key = `${day}-${period}`;
-                    const unavail = cls.unavailable || [];
-                    const newUnavail = unavail.includes(key) ? unavail.filter(k => k !== key) : [...unavail, key];
-                    setClasses(classes.map(c => c.id === cls.id ? { ...c, unavailable: newUnavail } : c));
-                };
                 return (
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                         <div className="space-y-4">
                             <div className="bg-white p-6 rounded shadow border">
                                 <h3 className="font-bold mb-4 flex gap-2"><Icon name="graduation-cap" /> Classes</h3>
                                 <div className="flex gap-2 mb-2"><input className="border p-2 rounded flex-1" placeholder="Class Name" value={classForm.name} onChange={e=>setClassForm({...classForm, name:e.target.value})} /><input className="border p-2 rounded w-24" placeholder="Short" value={classForm.short} onChange={e=>setClassForm({...classForm, short:e.target.value})} /><button onClick={()=>{if(classForm.name){setClasses([...classes, {id: Date.now().toString(), ...classForm, unavailable:[]}]); setClassForm({name:'', short:''})}}} className="bg-blue-600 text-white px-3 rounded">+</button></div>
-                                <ul className="divide-y border rounded bg-gray-50">{classes.map(c=>(<li key={c.id} className="p-3"><div className="flex justify-between items-center"><span className="font-medium">{c.name}</span><div className="flex gap-2"><button onClick={()=>setManagingClass(managingClass === c.id ? null : c.id)} className="text-xs bg-slate-200 px-2 rounded">Slots</button><button onClick={()=>setClasses(classes.filter(x=>x.id!==c.id))} className="text-red-500"><Icon name="trash-2" className="w-4 h-4"/></button></div></div>{managingClass === c.id && <div className="mt-2 grid grid-cols-6 gap-1 text-center text-xs"><div className="font-bold">Day</div>{[1,2,3,4,5].map(p=><div key={p}>P{p}</div>)}{["M","T","W","T","F"].map((d,i)=>(<React.Fragment key={d}><div className="font-bold">{d}</div>{[1,2,3,4,5].map(p=><div key={p} onClick={()=>toggleSlot(c,i,p)} className={`cursor-pointer border rounded ${c.unavailable?.includes(`${i}-${p}`) ? 'bg-red-500 text-white':'bg-white'}`}>{c.unavailable?.includes(`${i}-${p}`)?'X':''}</div>)}</React.Fragment>))}</div>}</li>))}</ul>
+                                <ul className="divide-y border rounded bg-gray-50">{classes.map(c=>(<li key={c.id} className="p-3 flex justify-between items-center"><span className="font-medium">{c.name}</span><button onClick={()=>setClasses(classes.filter(x=>x.id!==c.id))} className="text-red-500"><Icon name="trash-2" className="w-4 h-4"/></button></li>))}</ul>
                             </div>
                         </div>
                         <div className="space-y-4">
@@ -481,9 +430,7 @@
                             <div className="bg-blue-50 p-4 rounded flex justify-between items-center">
                                 <div className="flex gap-2 items-center">
                                     <span className="font-bold">Select Class:</span>
-                                    <select className="border p-2 rounded w-48" value={selClass} onChange={e=>setSelClass(e.target.value)}>
-                                        {classes.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
-                                    </select>
+                                    <select className="border p-2 rounded w-48" value={selClass} onChange={e=>setSelClass(e.target.value)}>{classes.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select>
                                 </div>
                                 <div className="font-mono bg-white px-2 rounded">Total: {cw.reduce((a,b)=>a+(b.hoursPerWeek||0),0)}</div>
                             </div>
@@ -500,19 +447,10 @@
                         <div className="bg-white p-4 rounded shadow border h-fit max-h-screen overflow-y-auto sticky top-20">
                             <h3 className="font-bold border-b pb-2 mb-2 flex items-center gap-2"><Icon name="activity" className="w-4 h-4"/> System Status</h3>
                             {currentConflicts.length > 0 ? (
-                                <div className="bg-red-50 border border-red-200 rounded p-2 mb-4">
-                                    <div className="text-red-700 font-bold text-xs mb-1">Conflicts Detected:</div>
-                                    <ul className="text-xs text-red-600 list-disc pl-4 space-y-1">{currentConflicts.map((err, i) => <li key={i}>{err}</li>)}</ul>
-                                </div>
+                                <div className="bg-red-50 border border-red-200 rounded p-2 mb-4"><div className="text-red-700 font-bold text-xs mb-1">Conflicts Detected:</div><ul className="text-xs text-red-600 list-disc pl-4 space-y-1">{currentConflicts.map((err, i) => <li key={i}>{err}</li>)}</ul></div>
                             ) : (<div className="bg-green-50 border border-green-200 rounded p-2 mb-4 text-xs text-green-700 font-bold text-center">No Conflicts Detected</div>)}
                             <h4 className="font-bold text-xs text-gray-500 uppercase mb-2">Faculty Load</h4>
-                            <div className="space-y-2">
-                                {faculty.map(f => {
-                                    const load = getFacultyLoad(f.id);
-                                    const color = load > 20 ? 'bg-red-100 text-red-800' : load > 15 ? 'bg-orange-100 text-orange-800' : 'bg-gray-100 text-gray-600';
-                                    return (<div key={f.id} className="flex justify-between items-center text-sm border-b pb-1 last:border-0"><span className="truncate w-24" title={f.name}>{f.name}</span><span className={`px-2 py-0.5 rounded text-xs font-mono font-bold ${color}`}>{load} hrs</span></div>);
-                                })}
-                            </div>
+                            <div className="space-y-2">{faculty.map(f => { const load = getFacultyLoad(f.id); const color = load > 20 ? 'bg-red-100 text-red-800' : load > 15 ? 'bg-orange-100 text-orange-800' : 'bg-gray-100 text-gray-600'; return (<div key={f.id} className="flex justify-between items-center text-sm border-b pb-1 last:border-0"><span className="truncate w-24" title={f.name}>{f.name}</span><span className={`px-2 py-0.5 rounded text-xs font-mono font-bold ${color}`}>{load} hrs</span></div>); })}</div>
                         </div>
                     </div>
                 );
@@ -543,90 +481,71 @@
                         const newWorkload = workload.map(w => w.id === id ? { ...w, fixedDay: day.toString(), fixedPeriod: period.toString() } : w);
                         setWorkload(newWorkload);
                     }
+                    else if (type === 'BLOCK_SLOT') {
+                        const key = `${day}-${period}`;
+                        const newClasses = classes.map(c => {
+                            if (c.id !== clsId) return c;
+                            const isBlocked = c.unavailable.includes(key);
+                            return { ...c, unavailable: isBlocked ? c.unavailable.filter(k => k !== key) : [...c.unavailable, key] };
+                        });
+                        setClasses(newClasses);
+                    }
                     setSelectedSlot(null);
                 };
 
                 const AllocationModal = () => {
                     if (!selectedSlot) return null;
                     const { clsId, day, period } = selectedSlot;
-                    
-                    // FILTER: Only show workload for this SPECIFIC class
                     const clsWorkload = workload.filter(w => w.classId === clsId);
                     const currentLock = subjectLocks[`${clsId}-${day}-${period}`];
-                    const className = classes.find(c=>c.id===clsId)?.name;
+                    const cls = classes.find(c => c.id === clsId);
+                    const isBlocked = cls.unavailable.includes(`${day}-${period}`);
+                    const className = cls?.name;
 
                     return (
                         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6" onClick={()=>setSelectedSlot(null)}>
-                            {/* Modal Container: Fixed Height on Mobile, Rounded, Shadow */}
                             <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden" onClick={e=>e.stopPropagation()}>
-                                
-                                {/* Header */}
                                 <div className="bg-slate-50 p-4 border-b flex justify-between items-center shrink-0">
-                                    <div>
-                                        <h3 className="font-bold text-lg text-slate-800">{className}</h3>
-                                        <div className="text-xs text-slate-500 font-mono">Day {["Mon","Tue","Wed","Thu","Fri"][day]} • Period {period}</div>
-                                    </div>
+                                    <div><h3 className="font-bold text-lg text-slate-800">{className}</h3><div className="text-xs text-slate-500 font-mono">Day {["Mon","Tue","Wed","Thu","Fri"][day]} • Period {period}</div></div>
                                     <button onClick={()=>setSelectedSlot(null)} className="text-gray-400 hover:text-red-500"><Icon name="x"/></button>
                                 </div>
-                                
-                                {/* Scrollable Content Body */}
                                 <div className="p-4 overflow-y-auto flex-1 space-y-6 bg-white">
-                                    
-                                    {/* Section A: Subject Locks */}
                                     <div>
                                         <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-3">Option A: Lock Subject (Flexible Teacher)</h4>
                                         <div className="grid grid-cols-2 gap-2">
                                             {subjects.map(s => (
-                                                <button key={s.id} onClick={() => handleAllocation('SUBJECT_LOCK', s.id)} 
-                                                    className={`p-2 rounded text-sm border transition-all ${currentLock === s.id ? 'bg-purple-600 text-white border-purple-600 shadow-md' : 'bg-slate-50 border-slate-200 text-slate-600 hover:border-purple-300'}`}>
-                                                    <div className="font-bold truncate">{s.name}</div>
-                                                    {currentLock === s.id && <div className="text-[10px] opacity-75">Active Lock</div>}
+                                                <button key={s.id} onClick={() => handleAllocation('SUBJECT_LOCK', s.id)} disabled={isBlocked}
+                                                    className={`p-2 rounded text-sm border transition-all ${currentLock === s.id ? 'bg-purple-600 text-white border-purple-600' : 'bg-slate-50 border-slate-200 text-slate-600 hover:border-purple-300'} disabled:opacity-50`}>
+                                                    <div className="font-bold truncate">{s.name}</div>{currentLock === s.id && <div className="text-[10px] opacity-75">Active Lock</div>}
                                                 </button>
                                             ))}
                                         </div>
-                                        {currentLock && (
-                                            <button onClick={() => handleAllocation('SUBJECT_LOCK', currentLock)} className="mt-2 text-xs text-red-500 flex items-center gap-1 hover:underline">
-                                                <Icon name="trash-2" className="w-3 h-3"/> Remove Subject Lock
-                                            </button>
-                                        )}
                                     </div>
-
-                                    {/* Section B: Manual Assignment */}
                                     <div>
-                                        <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-3">Option B: Force Specific Teacher Card</h4>
+                                        <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-3">Option B: Force Specific Teacher</h4>
                                         <div className="space-y-2">
                                             {clsWorkload.map(w => {
                                                 const sub = subjects.find(s=>s.id==w.subjectId);
                                                 const tea = faculty.find(f=>f.id==w.teacherId);
                                                 const isPlacedHere = w.fixedDay == day && w.fixedPeriod == period;
-                                                
-                                                // Card Style
                                                 return (
-                                                    <button key={w.id} onClick={() => handleAllocation('MANUAL_TASK', w.id)}
-                                                        className={`w-full text-left p-3 rounded-lg border flex items-center justify-between group transition-all ${isPlacedHere ? 'bg-green-50 border-green-500 ring-1 ring-green-500' : 'bg-white border-slate-200 hover:border-blue-400 hover:shadow-sm'}`}>
-                                                        <div>
-                                                            <div className="font-bold text-sm text-slate-800">{sub?.name}</div>
-                                                            <div className="text-xs text-slate-500 flex items-center gap-1">
-                                                                <Icon name="user" className="w-3 h-3"/> {tea?.name} ({tea?.short})
-                                                            </div>
-                                                        </div>
-                                                        {isPlacedHere ? 
-                                                            <Icon name="check-circle" className="w-5 h-5 text-green-600"/> : 
-                                                            <div className="text-xs bg-slate-100 text-slate-500 px-2 py-1 rounded group-hover:bg-blue-600 group-hover:text-white transition-colors">Assign</div>
-                                                        }
+                                                    <button key={w.id} onClick={() => handleAllocation('MANUAL_TASK', w.id)} disabled={isBlocked}
+                                                        className={`w-full text-left p-3 rounded-lg border flex items-center justify-between group transition-all ${isPlacedHere ? 'bg-green-50 border-green-500 ring-1 ring-green-500' : 'bg-white border-slate-200 hover:border-blue-400'} disabled:opacity-50`}>
+                                                        <div><div className="font-bold text-sm text-slate-800">{sub?.name}</div><div className="text-xs text-slate-500 flex items-center gap-1"><Icon name="user" className="w-3 h-3"/> {tea?.name}</div></div>
+                                                        {isPlacedHere ? <Icon name="check-circle" className="w-5 h-5 text-green-600"/> : <div className="text-xs bg-slate-100 text-slate-500 px-2 py-1 rounded group-hover:bg-blue-600 group-hover:text-white transition-colors">Assign</div>}
                                                     </button>
                                                 )
                                             })}
                                         </div>
                                     </div>
+                                    <div className="pt-4 border-t">
+                                        <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-3">Option C: Availability</h4>
+                                        <button onClick={() => handleAllocation('BLOCK_SLOT')} className={`w-full py-3 rounded-lg font-bold text-sm flex items-center justify-center gap-2 ${isBlocked ? 'bg-green-100 text-green-700 hover:bg-green-200' : 'bg-red-100 text-red-700 hover:bg-red-200'}`}>
+                                            {isBlocked ? <><Icon name="unlock" className="w-4 h-4"/> Unblock Slot (Make Available)</> : <><Icon name="lock" className="w-4 h-4"/> Block Slot (Make Unavailable)</>}
+                                        </button>
+                                    </div>
                                 </div>
-
-                                {/* Footer */}
-                                <div className="p-4 border-t bg-slate-50 shrink-0">
-                                    <button className="w-full py-3 bg-white border border-slate-300 rounded-lg text-slate-600 font-bold text-sm hover:bg-slate-100" onClick={()=>setSelectedSlot(null)}>
-                                        Cancel
-                                    </button>
-                                </div>
+                                <div className="p-4 border-t bg-slate-50 shrink-0"><button className="w-full py-3 bg-white border border-slate-300 rounded-lg text-slate-600 font-bold text-sm hover:bg-slate-100" onClick={()=>setSelectedSlot(null)}>Cancel</button></div>
                             </div>
                         </div>
                     );
@@ -643,52 +562,30 @@
                     <div className="space-y-8 relative">
                         {selectedSlot && <AllocationModal />}
                         {finalSchedule && (
-                            <div className="flex justify-end sticky top-16 z-20">
-                                <button onClick={handleGenerate} className="bg-purple-600 text-white px-4 py-2 rounded shadow flex gap-2 items-center hover:bg-purple-700">
-                                    <Icon name="refresh-cw" className="w-4 h-4"/> Resume / Regenerate
-                                </button>
-                            </div>
+                            <div className="flex justify-end sticky top-16 z-20"><button onClick={handleGenerate} className="bg-purple-600 text-white px-4 py-2 rounded shadow flex gap-2 items-center hover:bg-purple-700"><Icon name="refresh-cw" className="w-4 h-4"/> Resume / Regenerate</button></div>
                         )}
-
                         {classes.map(cls => (
                             <div key={cls.id} className="bg-white rounded shadow border overflow-hidden">
-                                <div className="bg-gray-100 p-3 font-bold border-b flex justify-between">
-                                    {cls.name}
-                                    <span className="text-xs font-normal text-gray-500">Click cells to edit</span>
-                                </div>
+                                <div className="bg-gray-100 p-3 font-bold border-b flex justify-between">{cls.name}<span className="text-xs font-normal text-gray-500">Click cells to edit</span></div>
                                 <div className="overflow-x-auto"><table className="w-full text-center text-sm border-collapse table-fixed">
                                     <thead><tr><th className="border p-2 w-16">Day</th>{[1,2,3,4,5].map(p=><th key={p} className="border p-2">P{p}</th>)}</tr></thead>
                                     <tbody>{["M","T","W","T","F"].map((d,i)=><tr key={d}><td className="border p-2 font-bold bg-gray-50">{d}</td>{[1,2,3,4,5].map(p=>{
                                         const slot = activeSchedule[cls.id][i][p];
                                         const lockId = subjectLocks[`${cls.id}-${i}-${p}`];
                                         const lockedSub = lockId ? subjects.find(s=>s.id===lockId) : null;
-
                                         let cellContent = <span className="text-gray-300">-</span>;
                                         let cellClass = "hover:bg-blue-50 cursor-pointer transition-colors";
 
-                                        if(slot && slot.type==='BLOCKED') {
-                                            cellContent = "N/A"; cellClass = "bg-red-50 text-red-300";
-                                        } else if (slot) {
-                                            const s=subjects.find(x=>x.id==slot.subjectId); 
-                                            const t=faculty.find(x=>x.id==slot.teacherId);
-                                            cellContent = (
-                                                <>
-                                                    <div className="font-bold">{s?.code||s?.name}</div>
-                                                    <div className="text-xs"><span style={{background:t?.color}} className="px-1 rounded border">{t?.short}</span></div>
-                                                    {slot.isFixed && <div className="text-[10px] text-green-600">Fixed</div>}
-                                                </>
-                                            );
+                                        if(slot && slot.type==='BLOCKED') { cellContent = "N/A"; cellClass = "bg-red-50 text-red-300"; } 
+                                        else if (slot) {
+                                            const s=subjects.find(x=>x.id==slot.subjectId); const t=faculty.find(x=>x.id==slot.teacherId);
+                                            cellContent = <><div className="font-bold">{s?.code||s?.name}</div><div className="text-xs"><span style={{background:t?.color}} className="px-1 rounded border">{t?.short}</span></div>{slot.isFixed && <div className="text-[10px] text-green-600">Fixed</div>}</>;
                                             if(slot.isFixed) cellClass += " bg-green-50";
                                         } else if (lockedSub) {
                                             cellContent = <div className="text-purple-600 font-bold text-xs">🔒 {lockedSub.name}</div>;
                                             cellClass += " bg-purple-50 ring-2 ring-inset ring-purple-200";
                                         }
-
-                                        return (
-                                            <td key={p} className={`border p-2 h-16 ${cellClass}`} onClick={() => setSelectedSlot({clsId: cls.id, day: i, period: p})}>
-                                                {cellContent}
-                                            </td>
-                                        );
+                                        return <td key={p} className={`border p-2 h-16 ${cellClass}`} onClick={() => setSelectedSlot({clsId: cls.id, day: i, period: p})}>{cellContent}</td>;
                                     })}</tr>)}</tbody>
                                 </table></div>
                             </div>
@@ -703,10 +600,7 @@
                         <h1 className="font-bold text-xl flex items-center gap-2"><Icon name="calendar" /> Timetable Architect 2.3</h1>
                         <div className="flex gap-4 items-center">
                             <span className={`text-xs font-bold text-green-600 transition-opacity ${saveStatus?'opacity-100':'opacity-0'}`}>Saved</span>
-                            <div className="relative overflow-hidden">
-                                <button className="text-xs bg-slate-100 px-3 py-1 rounded hover:bg-slate-200 border flex gap-1 items-center"><Icon name="upload" className="w-3 h-3"/> Import XML</button>
-                                <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="absolute inset-0 opacity-0 cursor-pointer" accept=".xml"/>
-                            </div>
+                            <div className="relative overflow-hidden"><button className="text-xs bg-slate-100 px-3 py-1 rounded hover:bg-slate-200 border flex gap-1 items-center"><Icon name="upload" className="w-3 h-3"/> Import XML</button><input type="file" ref={fileInputRef} onChange={handleFileUpload} className="absolute inset-0 opacity-0 cursor-pointer" accept=".xml"/></div>
                         </div>
                     </div>
                     {isGenerating && <LoadingOverlay />}
