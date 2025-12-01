@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Timetable Architect V2.5 (Anti-Freeze)</title>
+    <title>Timetable Architect V2.4 (Performance Fix)</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     
@@ -68,12 +68,16 @@
         // --- HELPER ---
         const generateId = () => Math.floor(Math.random() * 100000);
 
-        // --- LOGIC ENGINE v4.1 (Anti-Freeze & Time Throttled) ---
-        const runBacktrackingAlgorithm = async (workload, classes, subjects, faculty, constraints, subjectLocks, onProgress) => {
+        // --- LOGIC ENGINE v4.2 (Memory Optimized & Stoppable) ---
+        const runBacktrackingAlgorithm = async (workload, classes, subjects, faculty, constraints, subjectLocks, onProgress, shouldStopRef) => {
             const DAYS = 5; 
             const PERIODS = 5; 
             const schedule = {}; 
             
+            // Optimization: Create ALL_SLOTS array once to avoid GC thrashing
+            const ALL_SLOTS = [];
+            for(let d=0; d<DAYS; d++) for(let p=1; p<=PERIODS; p++) ALL_SLOTS.push({d, p});
+
             // 1. Setup Boards
             const teacherBusy = {}; 
             faculty.forEach(f => teacherBusy[f.id] = Array(DAYS).fill(null).map(() => Array(PERIODS + 1).fill(false)));
@@ -109,6 +113,7 @@
 
             tasks.sort((a, b) => {
                 if (a.isFixed !== b.isFixed) return a.isFixed ? -1 : 1;
+                // Heuristic: Fixed > Locks > Joint > Busy Teachers
                 const isALocked = subjectLocks[`${a.classId}-Any-Any`] === a.subjectId; 
                 const isBLocked = subjectLocks[`${b.classId}-Any-Any`] === b.subjectId;
                 if (isALocked !== isBLocked) return isALocked ? -1 : 1;
@@ -141,11 +146,15 @@
             const solve = async (taskIndex) => {
                 stats.iterations++;
                 
-                // ANTI-FREEZE: Only update UI every 100ms
+                // ANTI-FREEZE & STOP CHECK
                 const now = Date.now();
                 if (now - lastUIUpdate > 100) { 
                     lastUIUpdate = now;
-                    // Stop after 45 seconds to prevent infinite freezing
+                    
+                    // Check manual stop signal
+                    if (shouldStopRef.current === true) return false;
+
+                    // Auto-stop after 45 seconds
                     if (now - startTime > 45000) return false; 
                     
                     onProgress({ 
@@ -153,7 +162,7 @@
                         elapsed: ((now - startTime) / 1000).toFixed(1), 
                         currentTaskName: tasks[taskIndex] ? subjects.find(s=>s.id === tasks[taskIndex].subjectId)?.name : "Finishing..." 
                     });
-                    await new Promise(r => setTimeout(r, 0)); // Yield to browser
+                    await new Promise(r => setTimeout(r, 0)); 
                 }
 
                 if (taskIndex >= tasks.length) return true;
@@ -176,11 +185,16 @@
                     return false; 
                 }
 
+                // Optimization: Don't recreate array
                 const forcedSlots = [];
-                for(let d=0; d<DAYS; d++) for(let p=1; p<=PERIODS; p++) if (subjectLocks[`${task.classId}-${d}-${p}`] === task.subjectId) forcedSlots.push({d, p});
+                // Only scan if locks exist (optimization)
+                if (Object.keys(subjectLocks).length > 0) {
+                    for(let d=0; d<DAYS; d++) for(let p=1; p<=PERIODS; p++) if (subjectLocks[`${task.classId}-${d}-${p}`] === task.subjectId) forcedSlots.push({d, p});
+                }
                 
-                let slotsToTry = (forcedSlots.length > 0) ? forcedSlots.filter(s => schedule[task.classId][s.d][s.p] === null) : getAllSlots(DAYS, PERIODS);
-                if(forcedSlots.length > 0 && slotsToTry.length === 0) slotsToTry = getAllSlots(DAYS, PERIODS);
+                let slotsToTry = (forcedSlots.length > 0) ? forcedSlots.filter(s => schedule[task.classId][s.d][s.p] === null) : ALL_SLOTS;
+                // If forced slots are blocked, fallback is complex. For now, if lock exists but blocked, we fail the branch.
+                if(forcedSlots.length > 0 && slotsToTry.length === 0) return false; 
 
                 for (let {d, p} of slotsToTry) {
                     if (isValid(task, d, p)) {
@@ -194,12 +208,6 @@
                 return false;
             };
 
-            function getAllSlots(days, periods) {
-                let s = [];
-                for(let d=0; d<days; d++) for(let p=1; p<=periods; p++) s.push({d, p});
-                return s;
-            }
-
             const success = await solve(0);
             return { success, schedule, stats }; 
         };
@@ -212,6 +220,9 @@
             const [generationError, setGenerationError] = useState(null);
             const [saveStatus, setSaveStatus] = useState('');
             const fileInputRef = useRef(null);
+            
+            // Ref to control stopping
+            const shouldStopRef = useRef(false);
             
             const [progress, setProgress] = useState({ current: 0, total: 0, stats: {}, elapsed: 0, currentTaskName: '' });
 
@@ -288,6 +299,10 @@
                 reader.readAsText(file);
             };
 
+            const handleStop = () => {
+                shouldStopRef.current = true;
+            };
+
             const handleGenerate = async () => {
                 const conflicts = checkPreConditions();
                 if (conflicts.length > 0) {
@@ -296,19 +311,21 @@
                 }
 
                 setIsGenerating(true);
+                shouldStopRef.current = false; // Reset stop flag
                 setGenerationError(null);
                 setActiveTab('results'); 
 
                 try {
                     const { success, schedule, stats } = await runBacktrackingAlgorithm(
                         workload, classes, subjects, faculty, constraints, subjectLocks, 
-                        (prog) => setProgress(prog)
+                        (prog) => setProgress(prog),
+                        shouldStopRef // Pass ref to engine
                     );
                     
                     setFinalSchedule(schedule);
                     
                     if (!success) {
-                        alert(`Optimization Paused safely to prevent browser freeze.\n\nShowing partial results. You can now:\n1. Click empty cells to LOCK subjects or BLOCK slots.\n2. Click 'Resume' to finish remaining.`);
+                        alert(`Generation Stopped.\n\nShowing partial results. You can now:\n1. Click empty cells to LOCK subjects or BLOCK slots.\n2. Click 'Resume' to finish remaining.`);
                     }
                 } catch (err) {
                     console.error(err);
@@ -324,9 +341,15 @@
             const LoadingOverlay = () => (
                 <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
                     <div className="bg-white rounded-lg p-6 max-w-lg w-full shadow-2xl">
-                        <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
-                            <Icon name="cpu" className="animate-spin text-blue-600"/> Generating...
-                        </h2>
+                        <div className="flex justify-between items-center mb-4">
+                            <h2 className="text-xl font-bold flex items-center gap-2">
+                                <Icon name="cpu" className="animate-spin text-blue-600"/> Generating...
+                            </h2>
+                            <button onClick={handleStop} className="text-xs bg-red-100 text-red-600 px-3 py-1 rounded border border-red-200 hover:bg-red-200 font-bold">
+                                STOP & SHOW RESULT
+                            </button>
+                        </div>
+                        
                         <div className="w-full bg-gray-200 rounded-full h-4 mb-2 overflow-hidden">
                             <div className="bg-blue-600 h-4 rounded-full transition-all duration-300" style={{ width: `${(progress.current / (progress.total || 1)) * 100}%` }}></div>
                         </div>
@@ -335,7 +358,7 @@
                             <span>Time: {progress.elapsed}s</span>
                         </div>
                         <div className="bg-slate-900 rounded p-4 font-mono text-xs h-48 overflow-y-auto border border-slate-700 shadow-inner">
-                            <div className="text-green-400 mb-1">$ start_engine_v4.1.exe</div>
+                            <div className="text-green-400 mb-1">$ start_engine_v4.2.exe</div>
                             <div className="text-slate-400 mb-1">Loading {progress.total} tasks...</div>
                             {progress.currentTaskName && (<div className="text-yellow-300 mb-1 animate-pulse">> Processing: {progress.currentTaskName}</div>)}
                             <div className="mt-4 border-t border-slate-700 pt-2 grid grid-cols-2 gap-x-4">
@@ -597,7 +620,7 @@
             return (
                 <div className="min-h-screen pb-20">
                     <div className="bg-white border-b sticky top-0 z-10 px-4 h-16 flex items-center justify-between shadow-sm">
-                        <h1 className="font-bold text-xl flex items-center gap-2"><Icon name="calendar" /> Timetable Architect 2.5</h1>
+                        <h1 className="font-bold text-xl flex items-center gap-2"><Icon name="calendar" /> Timetable Architect 2.4</h1>
                         <div className="flex gap-4 items-center">
                             <span className={`text-xs font-bold text-green-600 transition-opacity ${saveStatus?'opacity-100':'opacity-0'}`}>Saved</span>
                             <div className="relative overflow-hidden"><button className="text-xs bg-slate-100 px-3 py-1 rounded hover:bg-slate-200 border flex gap-1 items-center"><Icon name="upload" className="w-3 h-3"/> Import XML</button><input type="file" ref={fileInputRef} onChange={handleFileUpload} className="absolute inset-0 opacity-0 cursor-pointer" accept=".xml"/></div>
