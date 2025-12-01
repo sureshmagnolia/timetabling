@@ -215,6 +215,7 @@
 
         // --- APP COMPONENT ---
         const TimetableApp = () => {
+            const [subjectLocks, setSubjectLocks] = useState({});
             const [activeTab, setActiveTab] = useState('faculty');
             const [isGenerating, setIsGenerating] = useState(false);
             const [generationError, setGenerationError] = useState(null);
@@ -231,7 +232,28 @@
             const [workload, setWorkload] = useState([]);
             const [constraints, setConstraints] = useState({ maxConsecutive: 2, maxDailyHours: 4, ensureAllDaysEngaged: true });
             const [finalSchedule, setFinalSchedule] = useState(null);
-
+            // 2. PASTE THIS VALIDATION FUNCTION (Critical for Generate Button)
+            const checkPreConditions = () => {
+                const errors = [];
+                const teacherMap = {}; 
+                workload.forEach(w => {
+                    // Check Fixed Tasks
+                    if (w.fixedDay !== undefined && w.fixedPeriod && w.fixedDay !== "") {
+                        const key = `${w.teacherId}-${w.fixedDay}-${w.fixedPeriod}`;
+                        const className = classes.find(c => c.id === w.classId)?.name;
+                        if (teacherMap[key]) {
+                            const tName = faculty.find(f => f.id === w.teacherId)?.name;
+                            errors.push(`CONFLICT: ${tName} is double-booked in ${teacherMap[key]} and ${className} (Day ${parseInt(w.fixedDay)+1} P${w.fixedPeriod})`);
+                        } else teacherMap[key] = className;
+                    }
+                    // Check Overload
+                    const load = workload.reduce((acc, curr) => (curr.teacherId === w.teacherId ? acc + (curr.hoursPerWeek||0) : acc), 0);
+                    if (load > 25 && !errors.some(e => e.includes(w.teacherId))) {
+                        errors.push(`OVERLOAD: Teacher ${faculty.find(f=>f.id===w.teacherId)?.name} has ${load} hrs (Max 25).`);
+                    }
+                });
+                return errors;
+            };
             useEffect(() => {
                 const savedData = localStorage.getItem('timetable_builder_v6');
                 if (savedData) {
@@ -312,30 +334,36 @@
             };
     
             const handleGenerate = async () => {
-                // --- NEW BLOCKING LOGIC START ---
-                // 1. Run the check before doing anything else
-                const conflicts = checkPreConditions();
+                // 1. Safety Check
+                if (!checkPreConditions) { alert("Error: Validation function missing."); return; }
                 
-                // 2. If conflicts exist, alert the user and STOP immediately
+                const conflicts = checkPreConditions();
                 if (conflicts.length > 0) {
-                    alert("❌ Cannot start generation!\n\nPlease resolve the 'Impossible Conflicts' shown in the Workload tab first.\n\n" + conflicts.join("\n"));
-                    return; // This return statement prevents the loop from ever starting
+                    alert("❌ Please resolve conflicts in Workload tab first:\n" + conflicts.join("\n"));
+                    return;
                 }
-                // --- NEW BLOCKING LOGIC END ---
 
-                // If no conflicts, proceed as normal...
                 setIsGenerating(true);
                 setGenerationError(null);
-                setProgress({ current: 0, total: 0, stats: {}, elapsed: 0 });
                 
+                // 2. Switch to Results tab so user can see progress
+                setActiveTab('results'); 
+
                 try {
-                    const result = await runBacktrackingAlgorithm(
-                        workload, classes, subjects, faculty, constraints, 
+                    // 3. Run Algorithm with Subject Locks
+                    const { success, schedule, stats } = await runBacktrackingAlgorithm(
+                        workload, classes, subjects, faculty, constraints, subjectLocks, 
                         (prog) => setProgress(prog)
                     );
-                    setFinalSchedule(result);
-                    setActiveTab('results');
+                    
+                    setFinalSchedule(schedule);
+                    
+                    if (!success) {
+                        // Partial Result Alert
+                        alert(`Optimization Paused.\n\nShowing partial results. You can now:\n1. Click empty cells to LOCK subjects.\n2. Click 'Resume' to finish.`);
+                    }
                 } catch (err) {
+                    console.error(err);
                     setGenerationError(err.message);
                 } finally {
                     setIsGenerating(false);
@@ -545,10 +573,14 @@
 
             const ResultsTab = () => {
                 if(generationError) return <div className="bg-red-50 p-8 text-center text-red-600 rounded">Error: {generationError} <br/><button onClick={()=>setActiveTab('workload')} className="text-blue-600 underline">Back</button></div>;
-                if(!finalSchedule) return <div className="text-center p-12 text-gray-400">Ready.</div>;
+                const activeSchedule = finalSchedule || classes.reduce((acc, cls) => {
+                    acc[cls.id] = Array(5).fill(null).map(() => Array(6).fill(null));
+                    return acc;
+                }, {});
                 return (
                     <div className="space-y-8">
                         {classes.map(cls => (
+                        <tbody>{["M","T","W","T","F"].map((d,i)=><tr key={d}><td ...>{d}</td>{[1,2,3,4,5].map(p=>{
                             <div key={cls.id} className="bg-white rounded shadow border overflow-hidden">
                                 <div className="bg-gray-100 p-3 font-bold border-b">{cls.name}</div>
                                 <div className="overflow-x-auto"><table className="w-full text-center text-sm border-collapse">
