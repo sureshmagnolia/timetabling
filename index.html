@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Timetable Architect V3.0 (Web Worker Edition)</title>
+    <title>Timetable Architect V3.1 (Live Stream)</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
@@ -51,7 +51,6 @@
             let tasks = [];
             workload.forEach(w => {
                 const count = w.fixedDay ? 1 : w.hoursPerWeek;
-                // We generate IDs here in worker for consistency
                 for (let i = 0; i < count; i++) {
                     tasks.push({ ...w, uniqueId: Math.random().toString(36), isFixed: !!w.fixedDay });
                 }
@@ -66,11 +65,10 @@
                 return (teacherLoad[b.teacherId]||0) - (teacherLoad[a.teacherId]||0);
             });
 
-            // Pre-calculate Slots
             const ALL_SLOTS = [];
             for(let d=0; d<DAYS; d++) for(let p=1; p<=PERIODS; p++) ALL_SLOTS.push({d, p});
 
-            // --- VALIDATION LOGIC (Synchronous for speed) ---
+            // --- VALIDATION LOGIC ---
             const isValid = (task, day, period) => {
                 if (schedule[task.classId][day][period] !== null) { stats.roomConflicts++; return false; }
                 if (teacherBusy[task.teacherId][day][period]) { stats.teacherConflicts++; return false; }
@@ -86,9 +84,7 @@
                     if (dailyCount >= constraints.maxDailyHours) { stats.dailyLimit++; return false; }
 
                     if (period > 1 && teacherBusy[task.teacherId][day][period-1]) {
-                        if (teacherBusy[task.teacherId][day][period-1]) { // Simple consecutive check
-                             // In tight loop, keep it simple: 
-                             // If prev is busy, check prev-prev. 
+                        if (teacherBusy[task.teacherId][day][period-1]) { 
                              if (period > 2 && teacherBusy[task.teacherId][day][period-2]) { 
                                  stats.consecutiveLimit++; return false; 
                              }
@@ -106,17 +102,18 @@
                 stats.iterations++;
 
                 // Throttled UI Updates (Every 100ms)
-                if ((stats.iterations & 127) === 0) { // Bitwise check is faster than modulo
+                if ((stats.iterations & 127) === 0) { 
                     const now = Date.now();
                     if (now - lastUpdate > 100) {
                         lastUpdate = now;
-                        // Send progress back to Main Thread
                         const currentTaskName = subjects.find(s=>s.id === tasks[taskIndex]?.subjectId)?.name || "Finishing...";
+                        // CRITICAL FIX: SEND SCHEDULE IN PROGRESS
                         self.postMessage({ 
                             type: 'progress', 
                             current: taskIndex, 
                             total: tasks.length, 
                             stats, 
+                            schedule, // <--- Send partial schedule
                             elapsed: ((now - startTime)/1000).toFixed(1),
                             currentTaskName 
                         });
@@ -132,7 +129,6 @@
                     if(task.assistantId) teacherBusy[task.assistantId][d][p] = val;
                 };
 
-                // FIXED TASK
                 if (task.isFixed) {
                     const d = parseInt(task.fixedDay);
                     const p = parseInt(task.fixedPeriod);
@@ -144,9 +140,7 @@
                     return false;
                 }
 
-                // FLEXIBLE TASK
                 const forcedSlots = [];
-                // Only scan locks if we have them
                 const hasLocks = Object.keys(subjectLocks).length > 0;
                 if(hasLocks) {
                     for(let d=0; d<DAYS; d++) for(let p=1; p<=PERIODS; p++) 
@@ -169,7 +163,6 @@
                 return false;
             };
 
-            // Start Solving (Synchronously - Fast!)
             try {
                 const success = solve(0);
                 self.postMessage({ type: 'done', success, schedule, stats });
@@ -185,7 +178,7 @@
         const { createRoot } = ReactDOM;
         const Icon = ({ name, className, onClick }) => <i data-lucide={name} className={className} onClick={onClick}></i>;
 
-        // XML PARSER (Same as before)
+        // XML PARSER
         const parseXMLData = (xmlText) => {
             const parser = new DOMParser();
             const doc = parser.parseFromString(xmlText, "text/xml");
@@ -215,10 +208,12 @@
             const [generationError, setGenerationError] = useState(null);
             const [saveStatus, setSaveStatus] = useState('');
             const fileInputRef = useRef(null);
-            const workerRef = useRef(null); // Reference to the Web Worker
+            const workerRef = useRef(null);
+            
+            // CRITICAL: Store latest partial result here
+            const latestWorkerSchedule = useRef(null);
 
             const [progress, setProgress] = useState({ current: 0, total: 0, stats: {}, elapsed: 0, currentTaskName: '' });
-
             const [faculty, setFaculty] = useState([{ id: '1', name: 'Suresh V', short: 'SV', color: '#ffebee' }]);
             const [classes, setClasses] = useState([{ id: '1', name: 'BSc Botany S6', short: 'S6', unavailable: [] }]);
             const [subjects, setSubjects] = useState([{ id: '1', name: 'Genetics', code: 'BOT101' }]);
@@ -226,7 +221,6 @@
             const [constraints, setConstraints] = useState({ maxConsecutive: 2, maxDailyHours: 4, ensureAllDaysEngaged: true });
             const [finalSchedule, setFinalSchedule] = useState(null);
 
-            // Init & Persistence
             useEffect(() => {
                 const savedData = localStorage.getItem('timetable_builder_v7');
                 if (savedData) {
@@ -297,17 +291,17 @@
                 setActiveTab('results');
                 setProgress({ current: 0, total: 0, stats: {}, elapsed: 0, currentTaskName: 'Starting Worker...' });
 
-                // 1. Create Web Worker from the script tag
                 const blob = new Blob([document.getElementById('worker-script').textContent], { type: "text/javascript" });
                 const worker = new Worker(URL.createObjectURL(blob));
                 workerRef.current = worker;
 
-                // 2. Setup Listeners
                 worker.onmessage = (e) => {
                     const { type, current, total, stats, elapsed, currentTaskName, success, schedule, message } = e.data;
                     
                     if (type === 'progress') {
                         setProgress({ current, total, stats, elapsed, currentTaskName });
+                        // SAVE STREAMED DATA
+                        if (schedule) latestWorkerSchedule.current = schedule;
                     } else if (type === 'done') {
                         setFinalSchedule(schedule);
                         setIsGenerating(false);
@@ -320,17 +314,21 @@
                     }
                 };
 
-                // 3. Start Worker
                 worker.postMessage({ workload, classes, subjects, faculty, constraints, subjectLocks });
             };
 
             const handleStop = () => {
+                // FORCE STOP: Use the latest streamed schedule
+                if (latestWorkerSchedule.current) {
+                    setFinalSchedule(latestWorkerSchedule.current);
+                }
+                
                 if (workerRef.current) {
                     workerRef.current.terminate();
                     workerRef.current = null;
                 }
                 setIsGenerating(false);
-                alert("Generation Stopped by User. (Previous results retained if any)");
+                // No alert needed, just show the grid
             };
 
             const getFacultyLoad = (id) => workload.reduce((acc, w) => (w.teacherId === id || w.assistantId === id) ? acc + (w.hoursPerWeek||0) : acc, 0);
@@ -344,8 +342,8 @@
                             <h2 className="text-xl font-bold flex items-center gap-2">
                                 <Icon name="cpu" className="animate-spin text-blue-600"/> Generating...
                             </h2>
-                            <button onClick={handleStop} className="text-xs bg-red-100 text-red-600 px-3 py-1 rounded border border-red-200 hover:bg-red-200 font-bold">
-                                STOP
+                            <button onClick={handleStop} className="text-xs bg-red-100 text-red-600 px-3 py-1 rounded border border-red-200 hover:bg-red-200 font-bold transition-colors">
+                                STOP & SHOW RESULT
                             </button>
                         </div>
                         <div className="w-full bg-gray-200 rounded-full h-4 mb-2 overflow-hidden">
@@ -618,7 +616,7 @@
             return (
                 <div className="min-h-screen pb-20">
                     <div className="bg-white border-b sticky top-0 z-10 px-4 h-16 flex items-center justify-between shadow-sm">
-                        <h1 className="font-bold text-xl flex items-center gap-2"><Icon name="calendar" /> Timetable Architect 3.0</h1>
+                        <h1 className="font-bold text-xl flex items-center gap-2"><Icon name="calendar" /> Timetable Architect 3.1</h1>
                         <div className="flex gap-4 items-center">
                             <span className={`text-xs font-bold text-green-600 transition-opacity ${saveStatus?'opacity-100':'opacity-0'}`}>Saved</span>
                             <div className="relative overflow-hidden"><button className="text-xs bg-slate-100 px-3 py-1 rounded hover:bg-slate-200 border flex gap-1 items-center"><Icon name="upload" className="w-3 h-3"/> Import XML</button><input type="file" ref={fileInputRef} onChange={handleFileUpload} className="absolute inset-0 opacity-0 cursor-pointer" accept=".xml"/></div>
