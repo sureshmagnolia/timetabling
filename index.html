@@ -569,7 +569,7 @@
                                 <div className="bg-gray-100 p-3 font-bold border-b flex justify-between">{cls.name}<span className="text-xs font-normal text-gray-500">Click cells to edit</span></div>
                                 <div className="overflow-x-auto"><table className="w-full text-center text-sm border-collapse table-fixed">
                                     <thead><tr><th className="border p-2 w-16">Day</th>{[1,2,3,4,5].map(p=><th key={p} className="border p-2">P{p}</th>)}</tr></thead>
-                                    <tbody>{["M","T","W","T","F"].map((d,i)=><tr key={d}><td className="border p-2 font-bold bg-gray-50">{d}</td>{[1,2,3,4,5].map(p=>{
+                                    <tbody>{["M","T","W","T","F"].map((d,i)=><tr key={i}><td className="border p-2 font-bold bg-gray-50">{d}</td>{[1,2,3,4,5].map(p=>{
                                         const slot = activeSchedule[cls.id][i][p];
                                         const lockId = subjectLocks[`${cls.id}-${i}-${p}`];
                                         const lockedSub = lockId ? subjects.find(s=>s.id===lockId) : null;
