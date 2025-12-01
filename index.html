@@ -249,17 +249,37 @@
 
             useEffect(() => { if(window.lucide) window.lucide.createIcons(); });
 
+            // --- UPDATED VALIDATION FUNCTION ---
             const checkPreConditions = () => {
                 const errors = [];
                 const teacherMap = {}; 
+                const roomMap = {}; // New: To catch Class overlaps
+
                 workload.forEach(w => {
+                    // Only check Fixed (Green) tasks
                     if (w.fixedDay !== undefined && w.fixedPeriod && w.fixedDay !== "") {
-                        const key = `${w.teacherId}-${w.fixedDay}-${w.fixedPeriod}`;
+                        const day = parseInt(w.fixedDay);
+                        const per = w.fixedPeriod;
                         const className = classes.find(c => c.id === w.classId)?.name;
-                        if (teacherMap[key]) {
-                            const tName = faculty.find(f => f.id === w.teacherId)?.name;
-                            errors.push(`CONFLICT: ${tName} is double-booked in ${teacherMap[key]} and ${className} (Day ${parseInt(w.fixedDay)+1} P${w.fixedPeriod})`);
-                        } else teacherMap[key] = className;
+                        const tName = faculty.find(f => f.id === w.teacherId)?.name;
+
+                        // 1. Check Teacher Collision
+                        const tKey = `${w.teacherId}-${day}-${per}`;
+                        if (teacherMap[tKey]) {
+                            errors.push(`CONFLICT: Teacher ${tName} is double-booked in ${teacherMap[tKey]} and ${className} (Day ${day+1} P${per})`);
+                        } else teacherMap[tKey] = className;
+
+                        // 2. Check Room/Class Collision (THIS IS WHAT YOU ASKED FOR)
+                        const rKey = `${w.classId}-${day}-${per}`;
+                        if (roomMap[rKey]) {
+                            errors.push(`CONFLICT: Class ${className} has TWO teachers assigned to Day ${day+1} P${per}. (If sharing, use 'Assistant' instead of separate tasks).`);
+                        } else roomMap[rKey] = true;
+                    }
+                    
+                    // Check Overload
+                    const load = workload.reduce((acc, curr) => (curr.teacherId === w.teacherId ? acc + (curr.hoursPerWeek||0) : acc), 0);
+                    if (load > 25 && !errors.some(e => e.includes(w.teacherId))) {
+                        errors.push(`OVERLOAD: Teacher ${faculty.find(f=>f.id===w.teacherId)?.name} has ${load} hrs (Max 25).`);
                     }
                 });
                 return errors;
