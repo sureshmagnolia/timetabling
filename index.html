@@ -73,194 +73,145 @@
         // --- ASYNC LOGIC ENGINE ---
         const generateId = () => Math.floor(Math.random() * 100000);
 
-        // NOTE: This is the "Grandmaster" Logic Engine v2.0
-        const runBacktrackingAlgorithm = async (workload, classes, subjects, faculty, constraints, onProgress) => {
-            const DAYS = 5; 
-            const PERIODS = 5; 
-            const schedule = {}; 
-            
-            // 1. FAST LOOKUP BOARDS (The "Chess Board")
-            // Tracks teacher availability instantly without looping through all classes
-            const teacherBusy = {}; 
-            faculty.forEach(f => {
-                teacherBusy[f.id] = Array(DAYS).fill(null).map(() => Array(PERIODS + 1).fill(false));
-            });
+        const ResultsTab = () => {
+                const [selectedSlot, setSelectedSlot] = useState(null); // {cls, day, period}
 
-            // Stats Tracking
-            const stats = { iterations: 0, conflicts: 0, backtracks: 0, depth: 0 };
-            const startTime = Date.now();
-
-            // Initialize Class Grid
-            classes.forEach(cls => {
-                schedule[cls.id] = Array(DAYS).fill(null).map(() => Array(PERIODS + 1).fill(null));
-                if (cls.unavailable) {
-                    cls.unavailable.forEach(slotStr => {
-                        const [d, p] = slotStr.split('-').map(Number);
-                        if (schedule[cls.id][d]) schedule[cls.id][d][p] = { type: 'BLOCKED' };
-                    });
-                }
-            });
-
-            // 2. STRATEGIC OPENING (Heuristic Sorting)
-            // Calculate "Difficulty Score" for each teacher
-            const teacherLoad = {};
-            workload.forEach(w => {
-                teacherLoad[w.teacherId] = (teacherLoad[w.teacherId] || 0) + (w.hoursPerWeek || 0);
-                if(w.assistantId) teacherLoad[w.assistantId] = (teacherLoad[w.assistantId] || 0) + (w.hoursPerWeek || 0);
-            });
-
-            let tasks = [];
-            workload.forEach(w => {
-                const count = w.fixedDay ? 1 : w.hoursPerWeek;
-                for (let i = 0; i < count; i++) {
-                    tasks.push({ ...w, uniqueId: generateId(), isFixed: !!w.fixedDay });
-                }
-            });
-
-            // Sort: Fixed -> Joint -> Busiest Teachers -> Rest
-            tasks.sort((a, b) => {
-                if (a.isFixed !== b.isFixed) return a.isFixed ? -1 : 1;
-                if (a.type === 'Joint' && b.type !== 'Joint') return -1;
-                if (b.type === 'Joint' && a.type !== 'Joint') return 1;
-                // Tie-breaker: Whichever teacher has more total work goes first
-                return (teacherLoad[b.teacherId]||0) - (teacherLoad[a.teacherId]||0);
-            });
-
-            const totalTasks = tasks.length;
-            
-            // Track remaining hours dynamically for "Look-Ahead"
-            const remainingHours = { ...teacherLoad };
-
-            // 3. THE "MOVE VALIDATOR"
-            const isValid = (task, day, period) => {
-                // A. Room Check
-                if (schedule[task.classId][day][period] !== null) return false;
-
-                // B. Teacher Check (Using Fast Lookup)
-                if (teacherBusy[task.teacherId][day][period]) return false;
-                if (task.assistantId && teacherBusy[task.assistantId][day][period]) return false;
-
-                // C. Soft Constraints (Only check if not fixed)
-                if (!task.isFixed) {
-                    // Max Daily Limit
-                    let dailyCount = 0;
-                    for(let p=1; p<=PERIODS; p++) {
-                        if(teacherBusy[task.teacherId][day][p]) dailyCount++;
-                    }
-                    if (dailyCount >= constraints.maxDailyHours) return false;
-
-                    // Consecutive Limit
-                    if (period > 1 && teacherBusy[task.teacherId][day][period-1]) {
-                        // Simple check: if already 2 in a row, don't add 3rd
-                        let streak = 0;
-                        for(let p=period-1; p>=1; p--) {
-                            if(teacherBusy[task.teacherId][day][p]) streak++; else break;
-                        }
-                        if(streak >= constraints.maxConsecutive) return false;
-                    }
-                }
-                return true;
-            };
-
-            // 4. FORWARD CHECKING (The "Chess Engine")
-            // "If I play this move, do I still have enough squares left for my other pieces?"
-            const isFutureViable = (teacherId, taskClassId) => {
-                const needed = remainingHours[teacherId];
-                if (needed <= 0) return true;
-
-                let possibleSlots = 0;
-                // Scan the board to count viable slots for this teacher
-                for(let d=0; d<DAYS; d++) {
-                    for(let p=1; p<=PERIODS; p++) {
-                        // Slot must be free for BOTH the Teacher AND the specific Class
-                        if (!teacherBusy[teacherId][d][p] && schedule[taskClassId][d][p] === null) {
-                            possibleSlots++;
+                // Helper: Handle Manual Allocation
+                const handleAllocation = (type, id) => {
+                    const { clsId, day, period } = selectedSlot;
+                    
+                    if (type === 'SUBJECT_LOCK') {
+                        // Lock Subject: "Math must happen here"
+                        const key = `${clsId}-${day}-${period}`;
+                        const newLocks = { ...subjectLocks };
+                        if (newLocks[key] === id) delete newLocks[key]; // Toggle off
+                        else newLocks[key] = id;
+                        setSubjectLocks(newLocks);
+                    } 
+                    else if (type === 'MANUAL_TASK') {
+                        // Manual Assign: "Suresh (Math) must happen here"
+                        // Find the task and update workload to be FIXED
+                        const task = workload.find(w => w.id === id);
+                        if (task) {
+                            const newWorkload = workload.map(w => w.id === id ? { ...w, fixedDay: day.toString(), fixedPeriod: period.toString() } : w);
+                            setWorkload(newWorkload);
                         }
                     }
-                }
-                // If we need 5 hours but only have 4 valid slots left -> CHECKMATE DETECTED
-                return possibleSlots >= needed;
-            };
-
-            const solve = async (taskIndex) => {
-                stats.iterations++;
-
-                // Anti-Freeze & UI Update
-                if (stats.iterations % 200 === 0) {
-                    if(stats.iterations > 300000) throw new Error("Optimization Timed Out. Constraints are too tight.");
-                    const elapsed = (Date.now() - startTime) / 1000;
-                    onProgress({
-                        current: taskIndex,
-                        total: totalTasks,
-                        stats: { ...stats, conficts: stats.backtracks }, // Show backtracks as conflicts
-                        elapsed: elapsed.toFixed(1),
-                        currentTaskName: tasks[taskIndex] ? (subjects.find(s=>s.id == tasks[taskIndex].subjectId)?.name || 'Processing') : "Finishing..."
-                    });
-                    await new Promise(r => setTimeout(r, 0));
-                }
-
-                if (taskIndex >= tasks.length) return true;
-                
-                const task = tasks[taskIndex];
-                const tId = task.teacherId;
-                const aId = task.assistantId;
-
-                // Helper to Place/Remove pieces
-                const toggle = (d, p, val) => {
-                    schedule[task.classId][d][p] = val ? task : null;
-                    teacherBusy[tId][d][p] = val;
-                    if(aId) teacherBusy[aId][d][p] = val;
-                    // Update "Remaining Hours" for Look-Ahead
-                    if (val) remainingHours[tId]--; else remainingHours[tId]++;
+                    setSelectedSlot(null);
                 };
 
-                // FIXED TASK HANDLING
-                if (task.isFixed) {
-                    const d = parseInt(task.fixedDay);
-                    const p = parseInt(task.fixedPeriod);
-                    if (isValid(task, d, p)) {
-                        toggle(d, p, true);
-                        if (await solve(taskIndex + 1)) return true;
-                        toggle(d, p, false);
-                    }
-                    return false;
-                }
+                // The Modal for Selection
+                const AllocationModal = () => {
+                    if (!selectedSlot) return null;
+                    const { clsId, day, period } = selectedSlot;
+                    const clsWorkload = workload.filter(w => w.classId === clsId);
+                    const currentLock = subjectLocks[`${clsId}-${day}-${period}`];
 
-                // FLEXIBLE TASK HANDLING
-                // Smart Move: Try days where this teacher is LEAST busy first (Spread load)
-                const bestDays = [0,1,2,3,4].sort((a,b) => {
-                    const loadA = teacherBusy[tId][a].filter(Boolean).length;
-                    const loadB = teacherBusy[tId][b].filter(Boolean).length;
-                    return loadA - loadB;
-                });
+                    return (
+                        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={()=>setSelectedSlot(null)}>
+                            <div className="bg-white p-6 rounded shadow-xl max-w-md w-full" onClick={e=>e.stopPropagation()}>
+                                <h3 className="font-bold text-lg mb-4">Manage Slot: {["Mon","Tue","Wed","Thu","Fri"][day]} - Period {period}</h3>
+                                
+                                {/* Option A: Lock Subject */}
+                                <div className="mb-6">
+                                    <h4 className="text-xs font-bold text-gray-500 uppercase mb-2">A. Lock Subject (Teacher Flexible)</h4>
+                                    <div className="flex flex-wrap gap-2">
+                                        {subjects.map(s => (
+                                            <button key={s.id} 
+                                                onClick={() => handleAllocation('SUBJECT_LOCK', s.id)}
+                                                className={`px-3 py-1 rounded border text-sm ${currentLock === s.id ? 'bg-purple-600 text-white' : 'bg-gray-50 hover:bg-gray-100'}`}>
+                                                {s.name} {currentLock === s.id && '(Locked)'}
+                                            </button>
+                                        ))}
+                                        {currentLock && <button onClick={() => handleAllocation('SUBJECT_LOCK', currentLock)} className="text-red-500 text-xs underline ml-2">Clear Lock</button>}
+                                    </div>
+                                </div>
 
-                for (let day of bestDays) {
-                    for (let period = 1; period <= PERIODS; period++) {
-                        if (isValid(task, day, period)) {
-                            
-                            // MAKE THE MOVE
-                            toggle(day, period, true);
+                                {/* Option B: Assign Specific Task */}
+                                <div>
+                                    <h4 className="text-xs font-bold text-gray-500 uppercase mb-2">B. Assign Specific Task (Hard Fix)</h4>
+                                    <div className="space-y-2 max-h-48 overflow-y-auto">
+                                        {clsWorkload.map(w => {
+                                            const sub = subjects.find(s=>s.id==w.subjectId);
+                                            const tea = faculty.find(f=>f.id==w.teacherId);
+                                            const isPlacedHere = w.fixedDay == day && w.fixedPeriod == period;
+                                            return (
+                                                <button key={w.id} 
+                                                    onClick={() => handleAllocation('MANUAL_TASK', w.id)}
+                                                    className={`w-full text-left p-2 rounded border flex justify-between ${isPlacedHere ? 'bg-green-100 border-green-500' : 'hover:bg-gray-50'}`}>
+                                                    <span>{sub?.name} <span className="text-gray-500 text-xs">({tea?.short})</span></span>
+                                                    {isPlacedHere ? <span className="font-bold text-green-700">Assigned</span> : <span className="text-xs bg-gray-200 px-2 rounded">Assign</span>}
+                                                </button>
+                                            )
+                                        })}
+                                    </div>
+                                </div>
+                                <button className="mt-6 w-full py-2 bg-gray-100 rounded text-gray-600" onClick={()=>setSelectedSlot(null)}>Close</button>
+                            </div>
+                        </div>
+                    );
+                };
 
-                            // --- INTELLIGENCE CHECK ---
-                            // Before proceeding, check if this move killed our future chances
-                            if (isFutureViable(tId, task.classId)) {
-                                if (await solve(taskIndex + 1)) return true;
-                            } else {
-                                stats.backtracks++; // Track how many "bad moves" we avoided
-                            }
+                if(!finalSchedule) return <div className="text-center p-12 text-gray-400">Ready. Click Generate.</div>;
 
-                            // BACKTRACK (Undo move)
-                            toggle(day, period, false);
-                        }
-                    }
-                }
-                
-                return false;
+                return (
+                    <div className="space-y-8 relative">
+                        {selectedSlot && <AllocationModal />}
+                        {/* Resume Button Overlay if Partial */}
+                        <div className="flex justify-end sticky top-16 z-20">
+                            <button onClick={handleGenerate} className="bg-purple-600 text-white px-4 py-2 rounded shadow flex gap-2 items-center hover:bg-purple-700">
+                                <Icon name="refresh-cw" className="w-4 h-4"/> Resume / Regenerate
+                            </button>
+                        </div>
+
+                        {classes.map(cls => (
+                            <div key={cls.id} className="bg-white rounded shadow border overflow-hidden">
+                                <div className="bg-gray-100 p-3 font-bold border-b flex justify-between">
+                                    {cls.name}
+                                    <span className="text-xs font-normal text-gray-500">Click cells to edit</span>
+                                </div>
+                                <div className="overflow-x-auto"><table className="w-full text-center text-sm border-collapse table-fixed">
+                                    <thead><tr><th className="border p-2 w-16">Day</th>{[1,2,3,4,5].map(p=><th key={p} className="border p-2">P{p}</th>)}</tr></thead>
+                                    <tbody>{["M","T","W","T","F"].map((d,i)=><tr key={d}><td className="border p-2 font-bold bg-gray-50">{d}</td>{[1,2,3,4,5].map(p=>{
+                                        const slot = finalSchedule[cls.id][i][p];
+                                        const lockId = subjectLocks[`${cls.id}-${i}-${p}`];
+                                        const lockedSub = lockId ? subjects.find(s=>s.id===lockId) : null;
+
+                                        // Cell styling
+                                        let cellContent = <span className="text-gray-300">-</span>;
+                                        let cellClass = "hover:bg-blue-50 cursor-pointer transition-colors";
+
+                                        if(slot && slot.type==='BLOCKED') {
+                                            cellContent = "N/A"; cellClass = "bg-red-50 text-red-300";
+                                        } else if (slot) {
+                                            const s=subjects.find(x=>x.id==slot.subjectId); 
+                                            const t=faculty.find(x=>x.id==slot.teacherId);
+                                            cellContent = (
+                                                <>
+                                                    <div className="font-bold">{s?.code||s?.name}</div>
+                                                    <div className="text-xs"><span style={{background:t?.color}} className="px-1 rounded border">{t?.short}</span></div>
+                                                    {slot.isFixed && <div className="text-[10px] text-green-600">Fixed</div>}
+                                                </>
+                                            );
+                                            if(slot.isFixed) cellClass += " bg-green-50";
+                                        } else if (lockedSub) {
+                                            // Empty but Subject Locked
+                                            cellContent = <div className="text-purple-600 font-bold text-xs">🔒 {lockedSub.name}</div>;
+                                            cellClass += " bg-purple-50 ring-2 ring-inset ring-purple-200";
+                                        }
+
+                                        return (
+                                            <td key={p} className={`border p-2 h-16 ${cellClass}`} onClick={() => setSelectedSlot({clsId: cls.id, day: i, period: p})}>
+                                                {cellContent}
+                                            </td>
+                                        );
+                                    })}</tr>)}</tbody>
+                                </table></div>
+                            </div>
+                        ))}
+                    </div>
+                );
             };
-
-            if (await solve(0)) return schedule;
-            throw new Error(`Could not fit all classes. (Backtracks: ${stats.backtracks})`);
-        };
 
         // --- APP COMPONENT ---
         const TimetableApp = () => {
