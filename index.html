@@ -112,10 +112,28 @@
                 }
             });
 
+           // --- NEW: Calculate Teacher Workloads for Heuristics ---
+            const teacherLoads = {};
+            workload.forEach(w => {
+                 teacherLoads[w.teacherId] = (teacherLoads[w.teacherId] || 0) + (w.hoursPerWeek || 0);
+            });
+
+            // --- CHANGED: Improved Sorting Strategy ---
+            // Order: Fixed Tasks -> Joint Classes -> Busiest Teachers -> Rest
             tasks.sort((a, b) => {
-                if (a.isFixed && !b.isFixed) return -1;
-                if (!a.isFixed && b.isFixed) return 1;
+                // 1. Fixed tasks always go first
+                if (a.isFixed !== b.isFixed) return a.isFixed ? -1 : 1;
+                
+                // 2. Joint classes are harder to fit, so place them next
                 if (a.type === 'Joint' && b.type !== 'Joint') return -1;
+                if (b.type === 'Joint' && a.type !== 'Joint') return 1;
+                
+                // 3. CRITICAL FIX: Prioritize teachers with the highest workload
+                // (This prevents the "indefinite loop" by fitting bottlenecks early)
+                const loadA = teacherLoads[a.teacherId] || 0;
+                const loadB = teacherLoads[b.teacherId] || 0;
+                if (loadA !== loadB) return loadB - loadA; // Descending (Highest load first)
+                
                 return 0;
             });
 
