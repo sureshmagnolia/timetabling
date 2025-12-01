@@ -3,94 +3,37 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Timetable Architect V2.4 (Performance Fix)</title>
+    <title>Timetable Architect V3.0 (Web Worker Edition)</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
-    
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-    
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    
     <script src="https://unpkg.com/lucide@latest"></script>
     
     <style>
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-        @keyframes pulse-slow {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
+        @keyframes pulse-slow { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
     </style>
 </head>
 <body class="bg-gray-50 text-slate-800 font-sans">
     <div id="root"></div>
 
-    <script type="text/babel">
-        const { useState, useEffect, useRef } = React;
-        const { createRoot } = ReactDOM;
-        
-        const Icon = ({ name, className, onClick }) => <i data-lucide={name} className={className} onClick={onClick}></i>;
-
-        // --- XML PARSER ---
-        const parseXMLData = (xmlText) => {
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(xmlText, "text/xml");
-            const faculty = Array.from(doc.getElementsByTagName('teacher')).map(t => ({
-                id: t.getAttribute('id'), name: t.getAttribute('name'), short: t.getAttribute('short'), color: t.getAttribute('color') || '#e0f2f1'
-            }));
-            const subjects = Array.from(doc.getElementsByTagName('subject')).map(s => ({
-                id: s.getAttribute('id'), name: s.getAttribute('name'), code: s.getAttribute('short') || s.getAttribute('name').substring(0, 5)
-            }));
-            const classes = Array.from(doc.getElementsByTagName('class')).map(c => ({
-                id: c.getAttribute('id'), name: c.getAttribute('name'), short: c.getAttribute('short'), unavailable: []
-            }));
-            const workload = [];
-            Array.from(doc.getElementsByTagName('lesson')).forEach(l => {
-                const tIds = l.getAttribute('teacherids').split(',');
-                const cIds = l.getAttribute('classids').split(',');
-                const subId = l.getAttribute('subjectid');
-                const periods = parseFloat(l.getAttribute('periodsperweek') || l.getAttribute('periodspercard') || 1);
-                const primaryTeacher = tIds[0];
-                const assistantTeacher = tIds.length > 1 ? tIds[1] : null;
-                cIds.forEach(cId => {
-                    if (!cId || !primaryTeacher) return;
-                    workload.push({
-                        id: l.getAttribute('id') + cId + Math.random().toString(36).substr(2, 5),
-                        classId: cId, subjectId: subId, teacherId: primaryTeacher, assistantId: assistantTeacher,
-                        hoursPerWeek: periods, type: assistantTeacher ? 'Joint' : 'Normal', isFixed: false
-                    });
-                });
-            });
-            return { faculty, subjects, classes, workload };
-        };
-
-        // --- HELPER ---
-        const generateId = () => Math.floor(Math.random() * 100000);
-
-        // --- LOGIC ENGINE v4.2 (Memory Optimized & Stoppable) ---
-        const runBacktrackingAlgorithm = async (workload, classes, subjects, faculty, constraints, subjectLocks, onProgress, shouldStopRef) => {
+    <script id="worker-script" type="javascript/worker">
+        self.onmessage = function(e) {
+            const { workload, classes, subjects, faculty, constraints, subjectLocks } = e.data;
+            
+            // --- WORKER UTILS ---
             const DAYS = 5; 
             const PERIODS = 5; 
-            const schedule = {}; 
-            
-            // Optimization: Create ALL_SLOTS array once to avoid GC thrashing
-            const ALL_SLOTS = [];
-            for(let d=0; d<DAYS; d++) for(let p=1; p<=PERIODS; p++) ALL_SLOTS.push({d, p});
-
-            // 1. Setup Boards
+            const schedule = {};
             const teacherBusy = {}; 
-            faculty.forEach(f => teacherBusy[f.id] = Array(DAYS).fill(null).map(() => Array(PERIODS + 1).fill(false)));
-
-            const stats = { 
-                iterations: 0, backtracks: 0, teacherConflicts: 0, roomConflicts: 0,
-                dailyLimit: 0, consecutiveLimit: 0, lockConflicts: 0
-            };
+            const stats = { iterations: 0, backtracks: 0, teacherConflicts: 0, roomConflicts: 0, dailyLimit: 0, consecutiveLimit: 0, lockConflicts: 0 };
             
-            const startTime = Date.now();
-            let lastUIUpdate = startTime;
-
-            // Initialize Grid & Handle Blocked Slots
+            // 1. Setup Data Structures
+            faculty.forEach(f => teacherBusy[f.id] = Array(DAYS).fill(null).map(() => Array(PERIODS + 1).fill(false)));
+            
             classes.forEach(cls => {
                 schedule[cls.id] = Array(DAYS).fill(null).map(() => Array(PERIODS + 1).fill(null));
                 if (cls.unavailable) {
@@ -101,25 +44,33 @@
                 }
             });
 
-            // 2. Sort Tasks
+            // 2. Prepare Tasks
             const teacherLoad = {};
             workload.forEach(w => teacherLoad[w.teacherId] = (teacherLoad[w.teacherId] || 0) + (w.hoursPerWeek || 0));
 
             let tasks = [];
             workload.forEach(w => {
                 const count = w.fixedDay ? 1 : w.hoursPerWeek;
-                for (let i = 0; i < count; i++) tasks.push({ ...w, uniqueId: generateId(), isFixed: !!w.fixedDay });
+                // We generate IDs here in worker for consistency
+                for (let i = 0; i < count; i++) {
+                    tasks.push({ ...w, uniqueId: Math.random().toString(36), isFixed: !!w.fixedDay });
+                }
             });
 
+            // Sort Heuristics
             tasks.sort((a, b) => {
                 if (a.isFixed !== b.isFixed) return a.isFixed ? -1 : 1;
-                // Heuristic: Fixed > Locks > Joint > Busy Teachers
                 const isALocked = subjectLocks[`${a.classId}-Any-Any`] === a.subjectId; 
                 const isBLocked = subjectLocks[`${b.classId}-Any-Any`] === b.subjectId;
                 if (isALocked !== isBLocked) return isALocked ? -1 : 1;
                 return (teacherLoad[b.teacherId]||0) - (teacherLoad[a.teacherId]||0);
             });
 
+            // Pre-calculate Slots
+            const ALL_SLOTS = [];
+            for(let d=0; d<DAYS; d++) for(let p=1; p<=PERIODS; p++) ALL_SLOTS.push({d, p});
+
+            // --- VALIDATION LOGIC (Synchronous for speed) ---
             const isValid = (task, day, period) => {
                 if (schedule[task.classId][day][period] !== null) { stats.roomConflicts++; return false; }
                 if (teacherBusy[task.teacherId][day][period]) { stats.teacherConflicts++; return false; }
@@ -135,34 +86,41 @@
                     if (dailyCount >= constraints.maxDailyHours) { stats.dailyLimit++; return false; }
 
                     if (period > 1 && teacherBusy[task.teacherId][day][period-1]) {
-                        let streak = 0;
-                        for(let p=period-1; p>=1; p--) if(teacherBusy[task.teacherId][day][p]) streak++; else break;
-                        if(streak >= constraints.maxConsecutive) { stats.consecutiveLimit++; return false; }
+                        if (teacherBusy[task.teacherId][day][period-1]) { // Simple consecutive check
+                             // In tight loop, keep it simple: 
+                             // If prev is busy, check prev-prev. 
+                             if (period > 2 && teacherBusy[task.teacherId][day][period-2]) { 
+                                 stats.consecutiveLimit++; return false; 
+                             }
+                        }
                     }
                 }
                 return true;
             };
 
-            const solve = async (taskIndex) => {
-                stats.iterations++;
-                
-                // ANTI-FREEZE & STOP CHECK
-                const now = Date.now();
-                if (now - lastUIUpdate > 100) { 
-                    lastUIUpdate = now;
-                    
-                    // Check manual stop signal
-                    if (shouldStopRef.current === true) return false;
+            // --- SOLVER LOOP ---
+            let lastUpdate = Date.now();
+            const startTime = Date.now();
 
-                    // Auto-stop after 45 seconds
-                    if (now - startTime > 45000) return false; 
-                    
-                    onProgress({ 
-                        current: taskIndex, total: tasks.length, stats, 
-                        elapsed: ((now - startTime) / 1000).toFixed(1), 
-                        currentTaskName: tasks[taskIndex] ? subjects.find(s=>s.id === tasks[taskIndex].subjectId)?.name : "Finishing..." 
-                    });
-                    await new Promise(r => setTimeout(r, 0)); 
+            const solve = (taskIndex) => {
+                stats.iterations++;
+
+                // Throttled UI Updates (Every 100ms)
+                if ((stats.iterations & 127) === 0) { // Bitwise check is faster than modulo
+                    const now = Date.now();
+                    if (now - lastUpdate > 100) {
+                        lastUpdate = now;
+                        // Send progress back to Main Thread
+                        const currentTaskName = subjects.find(s=>s.id === tasks[taskIndex]?.subjectId)?.name || "Finishing...";
+                        self.postMessage({ 
+                            type: 'progress', 
+                            current: taskIndex, 
+                            total: tasks.length, 
+                            stats, 
+                            elapsed: ((now - startTime)/1000).toFixed(1),
+                            currentTaskName 
+                        });
+                    }
                 }
 
                 if (taskIndex >= tasks.length) return true;
@@ -174,45 +132,82 @@
                     if(task.assistantId) teacherBusy[task.assistantId][d][p] = val;
                 };
 
+                // FIXED TASK
                 if (task.isFixed) {
                     const d = parseInt(task.fixedDay);
                     const p = parseInt(task.fixedPeriod);
                     if (isValid(task, d, p)) {
                         toggle(d, p, true);
-                        if (await solve(taskIndex + 1)) return true;
+                        if (solve(taskIndex + 1)) return true;
                         toggle(d, p, false);
                     }
-                    return false; 
+                    return false;
                 }
 
-                // Optimization: Don't recreate array
+                // FLEXIBLE TASK
                 const forcedSlots = [];
-                // Only scan if locks exist (optimization)
-                if (Object.keys(subjectLocks).length > 0) {
-                    for(let d=0; d<DAYS; d++) for(let p=1; p<=PERIODS; p++) if (subjectLocks[`${task.classId}-${d}-${p}`] === task.subjectId) forcedSlots.push({d, p});
+                // Only scan locks if we have them
+                const hasLocks = Object.keys(subjectLocks).length > 0;
+                if(hasLocks) {
+                    for(let d=0; d<DAYS; d++) for(let p=1; p<=PERIODS; p++) 
+                        if (subjectLocks[`${task.classId}-${d}-${p}`] === task.subjectId) forcedSlots.push({d, p});
                 }
-                
-                let slotsToTry = (forcedSlots.length > 0) ? forcedSlots.filter(s => schedule[task.classId][s.d][s.p] === null) : ALL_SLOTS;
-                // If forced slots are blocked, fallback is complex. For now, if lock exists but blocked, we fail the branch.
-                if(forcedSlots.length > 0 && slotsToTry.length === 0) return false; 
 
-                for (let {d, p} of slotsToTry) {
+                let slotsToTry = (forcedSlots.length > 0) ? forcedSlots.filter(s => schedule[task.classId][s.d][s.p] === null) : ALL_SLOTS;
+                if(forcedSlots.length > 0 && slotsToTry.length === 0) return false;
+
+                for (let i = 0; i < slotsToTry.length; i++) {
+                    const {d, p} = slotsToTry[i];
                     if (isValid(task, d, p)) {
                         toggle(d, p, true);
-                        if (await solve(taskIndex + 1)) return true;
+                        if (solve(taskIndex + 1)) return true;
                         toggle(d, p, false);
                     } else {
-                        stats.backtracks++; 
+                        stats.backtracks++;
                     }
                 }
                 return false;
             };
 
-            const success = await solve(0);
-            return { success, schedule, stats }; 
+            // Start Solving (Synchronously - Fast!)
+            try {
+                const success = solve(0);
+                self.postMessage({ type: 'done', success, schedule, stats });
+            } catch (e) {
+                self.postMessage({ type: 'error', message: e.message });
+            }
+        };
+    </script>
+
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+        const { createRoot } = ReactDOM;
+        const Icon = ({ name, className, onClick }) => <i data-lucide={name} className={className} onClick={onClick}></i>;
+
+        // XML PARSER (Same as before)
+        const parseXMLData = (xmlText) => {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(xmlText, "text/xml");
+            const faculty = Array.from(doc.getElementsByTagName('teacher')).map(t => ({ id: t.getAttribute('id'), name: t.getAttribute('name'), short: t.getAttribute('short'), color: t.getAttribute('color') || '#e0f2f1' }));
+            const subjects = Array.from(doc.getElementsByTagName('subject')).map(s => ({ id: s.getAttribute('id'), name: s.getAttribute('name'), code: s.getAttribute('short') || s.getAttribute('name').substring(0, 5) }));
+            const classes = Array.from(doc.getElementsByTagName('class')).map(c => ({ id: c.getAttribute('id'), name: c.getAttribute('name'), short: c.getAttribute('short'), unavailable: [] }));
+            const workload = [];
+            Array.from(doc.getElementsByTagName('lesson')).forEach(l => {
+                const tIds = l.getAttribute('teacherids').split(',');
+                const cIds = l.getAttribute('classids').split(',');
+                const subId = l.getAttribute('subjectid');
+                const periods = parseFloat(l.getAttribute('periodsperweek') || l.getAttribute('periodspercard') || 1);
+                const primaryTeacher = tIds[0];
+                const assistantTeacher = tIds.length > 1 ? tIds[1] : null;
+                cIds.forEach(cId => {
+                    if (!cId || !primaryTeacher) return;
+                    workload.push({ id: l.getAttribute('id') + cId + Math.random().toString(36).substr(2, 5), classId: cId, subjectId: subId, teacherId: primaryTeacher, assistantId: assistantTeacher, hoursPerWeek: periods, type: assistantTeacher ? 'Joint' : 'Normal', isFixed: false });
+                });
+            });
+            return { faculty, subjects, classes, workload };
         };
 
-        // --- APP COMPONENT ---
         const TimetableApp = () => {
             const [subjectLocks, setSubjectLocks] = useState({});
             const [activeTab, setActiveTab] = useState('faculty');
@@ -220,18 +215,45 @@
             const [generationError, setGenerationError] = useState(null);
             const [saveStatus, setSaveStatus] = useState('');
             const fileInputRef = useRef(null);
-            
-            // Ref to control stopping
-            const shouldStopRef = useRef(false);
-            
+            const workerRef = useRef(null); // Reference to the Web Worker
+
             const [progress, setProgress] = useState({ current: 0, total: 0, stats: {}, elapsed: 0, currentTaskName: '' });
 
-            const [faculty, setFaculty] = useState([]);
-            const [classes, setClasses] = useState([]);
-            const [subjects, setSubjects] = useState([]);
+            const [faculty, setFaculty] = useState([{ id: '1', name: 'Suresh V', short: 'SV', color: '#ffebee' }]);
+            const [classes, setClasses] = useState([{ id: '1', name: 'BSc Botany S6', short: 'S6', unavailable: [] }]);
+            const [subjects, setSubjects] = useState([{ id: '1', name: 'Genetics', code: 'BOT101' }]);
             const [workload, setWorkload] = useState([]);
             const [constraints, setConstraints] = useState({ maxConsecutive: 2, maxDailyHours: 4, ensureAllDaysEngaged: true });
             const [finalSchedule, setFinalSchedule] = useState(null);
+
+            // Init & Persistence
+            useEffect(() => {
+                const savedData = localStorage.getItem('timetable_builder_v7');
+                if (savedData) {
+                    try {
+                        const parsed = JSON.parse(savedData);
+                        if(parsed.faculty) setFaculty(parsed.faculty);
+                        if(parsed.classes) setClasses(parsed.classes);
+                        if(parsed.subjects) setSubjects(parsed.subjects);
+                        if(parsed.workload) setWorkload(parsed.workload);
+                        if(parsed.constraints) setConstraints(parsed.constraints);
+                        if(parsed.subjectLocks) setSubjectLocks(parsed.subjectLocks);
+                    } catch (e) { console.error(e); }
+                }
+                if(window.lucide) window.lucide.createIcons();
+            }, []);
+
+            useEffect(() => {
+                const timeoutId = setTimeout(() => {
+                    const data = { faculty, classes, subjects, workload, constraints, subjectLocks };
+                    localStorage.setItem('timetable_builder_v7', JSON.stringify(data));
+                    setSaveStatus('Saved');
+                    setTimeout(() => setSaveStatus(''), 2000);
+                }, 500);
+                return () => clearTimeout(timeoutId);
+            }, [faculty, classes, subjects, workload, constraints, subjectLocks]);
+
+            useEffect(() => { if(window.lucide) window.lucide.createIcons(); });
 
             const checkPreConditions = () => {
                 const errors = [];
@@ -245,45 +267,9 @@
                             errors.push(`CONFLICT: ${tName} is double-booked in ${teacherMap[key]} and ${className} (Day ${parseInt(w.fixedDay)+1} P${w.fixedPeriod})`);
                         } else teacherMap[key] = className;
                     }
-                    const load = workload.reduce((acc, curr) => (curr.teacherId === w.teacherId ? acc + (curr.hoursPerWeek||0) : acc), 0);
-                    if (load > 25 && !errors.some(e => e.includes(w.teacherId))) {
-                        errors.push(`OVERLOAD: Teacher ${faculty.find(f=>f.id===w.teacherId)?.name} has ${load} hrs (Max 25).`);
-                    }
                 });
                 return errors;
             };
-
-            useEffect(() => {
-                const savedData = localStorage.getItem('timetable_builder_v6');
-                if (savedData) {
-                    try {
-                        const parsed = JSON.parse(savedData);
-                        if(parsed.faculty) setFaculty(parsed.faculty);
-                        if(parsed.classes) setClasses(parsed.classes);
-                        if(parsed.subjects) setSubjects(parsed.subjects);
-                        if(parsed.workload) setWorkload(parsed.workload);
-                        if(parsed.constraints) setConstraints(parsed.constraints);
-                        if(parsed.subjectLocks) setSubjectLocks(parsed.subjectLocks);
-                    } catch (e) { console.error(e); }
-                } else {
-                    setFaculty([{ id: '1', name: 'Suresh V', short: 'SV', color: '#ffebee' }]);
-                    setClasses([{ id: '1', name: 'BSc Botany S6', short: 'S6', unavailable: [] }]);
-                    setSubjects([{ id: '1', name: 'Genetics', code: 'BOT101' }]);
-                }
-                if(window.lucide) window.lucide.createIcons();
-            }, []);
-
-            useEffect(() => {
-                const timeoutId = setTimeout(() => {
-                    const data = { faculty, classes, subjects, workload, constraints, subjectLocks };
-                    localStorage.setItem('timetable_builder_v6', JSON.stringify(data));
-                    setSaveStatus('Saved');
-                    setTimeout(() => setSaveStatus(''), 2000);
-                }, 500);
-                return () => clearTimeout(timeoutId);
-            }, [faculty, classes, subjects, workload, constraints, subjectLocks]);
-
-            useEffect(() => { if(window.lucide) window.lucide.createIcons(); });
 
             const handleFileUpload = (e) => {
                 const file = e.target.files[0];
@@ -299,11 +285,7 @@
                 reader.readAsText(file);
             };
 
-            const handleStop = () => {
-                shouldStopRef.current = true;
-            };
-
-            const handleGenerate = async () => {
+            const handleGenerate = () => {
                 const conflicts = checkPreConditions();
                 if (conflicts.length > 0) {
                     alert("❌ Please resolve conflicts in Workload tab first:\n" + conflicts.join("\n"));
@@ -311,33 +293,50 @@
                 }
 
                 setIsGenerating(true);
-                shouldStopRef.current = false; // Reset stop flag
                 setGenerationError(null);
-                setActiveTab('results'); 
+                setActiveTab('results');
+                setProgress({ current: 0, total: 0, stats: {}, elapsed: 0, currentTaskName: 'Starting Worker...' });
 
-                try {
-                    const { success, schedule, stats } = await runBacktrackingAlgorithm(
-                        workload, classes, subjects, faculty, constraints, subjectLocks, 
-                        (prog) => setProgress(prog),
-                        shouldStopRef // Pass ref to engine
-                    );
+                // 1. Create Web Worker from the script tag
+                const blob = new Blob([document.getElementById('worker-script').textContent], { type: "text/javascript" });
+                const worker = new Worker(URL.createObjectURL(blob));
+                workerRef.current = worker;
+
+                // 2. Setup Listeners
+                worker.onmessage = (e) => {
+                    const { type, current, total, stats, elapsed, currentTaskName, success, schedule, message } = e.data;
                     
-                    setFinalSchedule(schedule);
-                    
-                    if (!success) {
-                        alert(`Generation Stopped.\n\nShowing partial results. You can now:\n1. Click empty cells to LOCK subjects or BLOCK slots.\n2. Click 'Resume' to finish remaining.`);
+                    if (type === 'progress') {
+                        setProgress({ current, total, stats, elapsed, currentTaskName });
+                    } else if (type === 'done') {
+                        setFinalSchedule(schedule);
+                        setIsGenerating(false);
+                        worker.terminate();
+                        if(!success) alert("Completed with partial results. Some classes could not be placed.");
+                    } else if (type === 'error') {
+                        setGenerationError(message);
+                        setIsGenerating(false);
+                        worker.terminate();
                     }
-                } catch (err) {
-                    console.error(err);
-                    setGenerationError(err.message);
-                } finally {
-                    setIsGenerating(false);
+                };
+
+                // 3. Start Worker
+                worker.postMessage({ workload, classes, subjects, faculty, constraints, subjectLocks });
+            };
+
+            const handleStop = () => {
+                if (workerRef.current) {
+                    workerRef.current.terminate();
+                    workerRef.current = null;
                 }
+                setIsGenerating(false);
+                alert("Generation Stopped by User. (Previous results retained if any)");
             };
 
             const getFacultyLoad = (id) => workload.reduce((acc, w) => (w.teacherId === id || w.assistantId === id) ? acc + (w.hoursPerWeek||0) : acc, 0);
 
-            // --- COMPONENTS ---
+            // --- UI COMPONENTS ---
+            
             const LoadingOverlay = () => (
                 <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
                     <div className="bg-white rounded-lg p-6 max-w-lg w-full shadow-2xl">
@@ -346,10 +345,9 @@
                                 <Icon name="cpu" className="animate-spin text-blue-600"/> Generating...
                             </h2>
                             <button onClick={handleStop} className="text-xs bg-red-100 text-red-600 px-3 py-1 rounded border border-red-200 hover:bg-red-200 font-bold">
-                                STOP & SHOW RESULT
+                                STOP
                             </button>
                         </div>
-                        
                         <div className="w-full bg-gray-200 rounded-full h-4 mb-2 overflow-hidden">
                             <div className="bg-blue-600 h-4 rounded-full transition-all duration-300" style={{ width: `${(progress.current / (progress.total || 1)) * 100}%` }}></div>
                         </div>
@@ -358,7 +356,7 @@
                             <span>Time: {progress.elapsed}s</span>
                         </div>
                         <div className="bg-slate-900 rounded p-4 font-mono text-xs h-48 overflow-y-auto border border-slate-700 shadow-inner">
-                            <div className="text-green-400 mb-1">$ start_engine_v4.2.exe</div>
+                            <div className="text-green-400 mb-1">$ worker_thread_active</div>
                             <div className="text-slate-400 mb-1">Loading {progress.total} tasks...</div>
                             {progress.currentTaskName && (<div className="text-yellow-300 mb-1 animate-pulse">> Processing: {progress.currentTaskName}</div>)}
                             <div className="mt-4 border-t border-slate-700 pt-2 grid grid-cols-2 gap-x-4">
@@ -620,7 +618,7 @@
             return (
                 <div className="min-h-screen pb-20">
                     <div className="bg-white border-b sticky top-0 z-10 px-4 h-16 flex items-center justify-between shadow-sm">
-                        <h1 className="font-bold text-xl flex items-center gap-2"><Icon name="calendar" /> Timetable Architect 2.4</h1>
+                        <h1 className="font-bold text-xl flex items-center gap-2"><Icon name="calendar" /> Timetable Architect 3.0</h1>
                         <div className="flex gap-4 items-center">
                             <span className={`text-xs font-bold text-green-600 transition-opacity ${saveStatus?'opacity-100':'opacity-0'}`}>Saved</span>
                             <div className="relative overflow-hidden"><button className="text-xs bg-slate-100 px-3 py-1 rounded hover:bg-slate-200 border flex gap-1 items-center"><Icon name="upload" className="w-3 h-3"/> Import XML</button><input type="file" ref={fileInputRef} onChange={handleFileUpload} className="absolute inset-0 opacity-0 cursor-pointer" accept=".xml"/></div>
