@@ -69,7 +69,7 @@
         // --- HELPER ---
         const generateId = () => Math.floor(Math.random() * 100000);
 
-        // --- LOGIC ENGINE v3.0 (Interactive & Partial Save) ---
+        // --- LOGIC ENGINE v3.1 (With Detailed Stats) ---
         const runBacktrackingAlgorithm = async (workload, classes, subjects, faculty, constraints, subjectLocks, onProgress) => {
             const DAYS = 5; 
             const PERIODS = 5; 
@@ -79,7 +79,16 @@
             const teacherBusy = {}; 
             faculty.forEach(f => teacherBusy[f.id] = Array(DAYS).fill(null).map(() => Array(PERIODS + 1).fill(false)));
 
-            const stats = { iterations: 0, backtracks: 0 };
+            // NEW: Detailed Stats Counters
+            const stats = { 
+                iterations: 0, 
+                backtracks: 0,
+                teacherConflicts: 0,
+                roomConflicts: 0,
+                dailyLimit: 0,
+                consecutiveLimit: 0,
+                lockConflicts: 0
+            };
             const startTime = Date.now();
 
             // Initialize Grid
@@ -93,7 +102,7 @@
                 }
             });
 
-            // 2. Sort Tasks (Heuristics)
+            // 2. Sort Tasks
             const teacherLoad = {};
             workload.forEach(w => teacherLoad[w.teacherId] = (teacherLoad[w.teacherId] || 0) + (w.hoursPerWeek || 0));
 
@@ -103,41 +112,38 @@
                 for (let i = 0; i < count; i++) tasks.push({ ...w, uniqueId: generateId(), isFixed: !!w.fixedDay });
             });
 
-            // Priority: Fixed -> Subject Locked -> Joint -> Busiest -> Rest
             tasks.sort((a, b) => {
                 if (a.isFixed !== b.isFixed) return a.isFixed ? -1 : 1;
-                
-                // Check subject locks
                 const isALocked = subjectLocks[`${a.classId}-Any-Any`] === a.subjectId; 
                 const isBLocked = subjectLocks[`${b.classId}-Any-Any`] === b.subjectId;
                 if (isALocked !== isBLocked) return isALocked ? -1 : 1;
-                
                 if (a.type === 'Joint' && b.type !== 'Joint') return -1;
                 if (b.type === 'Joint' && a.type !== 'Joint') return 1;
                 return (teacherLoad[b.teacherId]||0) - (teacherLoad[a.teacherId]||0);
             });
 
+            // 3. Validator with Side-Effect Stats
             const isValid = (task, day, period) => {
                 // A. Basic Conflicts
-                if (schedule[task.classId][day][period] !== null) return false;
-                if (teacherBusy[task.teacherId][day][period]) return false;
-                if (task.assistantId && teacherBusy[task.assistantId][day][period]) return false;
+                if (schedule[task.classId][day][period] !== null) { stats.roomConflicts++; return false; }
+                if (teacherBusy[task.teacherId][day][period]) { stats.teacherConflicts++; return false; }
+                if (task.assistantId && teacherBusy[task.assistantId][day][period]) { stats.teacherConflicts++; return false; }
 
-                // B. SUBJECT LOCK CHECK
+                // B. Lock Check
                 const lockKey = `${task.classId}-${day}-${period}`;
                 const lockedSubjectId = subjectLocks[lockKey];
-                if (lockedSubjectId && lockedSubjectId !== task.subjectId) return false;
+                if (lockedSubjectId && lockedSubjectId !== task.subjectId) { stats.lockConflicts++; return false; }
 
                 // C. Soft Constraints
                 if (!task.isFixed && !lockedSubjectId) {
                     let dailyCount = 0;
                     for(let p=1; p<=PERIODS; p++) if(teacherBusy[task.teacherId][day][p]) dailyCount++;
-                    if (dailyCount >= constraints.maxDailyHours) return false;
+                    if (dailyCount >= constraints.maxDailyHours) { stats.dailyLimit++; return false; }
 
                     if (period > 1 && teacherBusy[task.teacherId][day][period-1]) {
                         let streak = 0;
                         for(let p=period-1; p>=1; p--) if(teacherBusy[task.teacherId][day][p]) streak++; else break;
-                        if(streak >= constraints.maxConsecutive) return false;
+                        if(streak >= constraints.maxConsecutive) { stats.consecutiveLimit++; return false; }
                     }
                 }
                 return true;
@@ -146,9 +152,10 @@
             const solve = async (taskIndex) => {
                 stats.iterations++;
                 if (stats.iterations % 200 === 0) {
-                    if(stats.iterations > 150000) return false; // Partial result trigger
+                    if(stats.iterations > 200000) return false; 
                     const elapsed = (Date.now() - startTime) / 1000;
-                    onProgress({ current: taskIndex, total: tasks.length, stats, elapsed: elapsed.toFixed(1) });
+                    const currentTaskName = tasks[taskIndex] ? subjects.find(s=>s.id === tasks[taskIndex].subjectId)?.name : "Finishing...";
+                    onProgress({ current: taskIndex, total: tasks.length, stats, elapsed: elapsed.toFixed(1), currentTaskName });
                     await new Promise(r => setTimeout(r, 0));
                 }
 
@@ -161,7 +168,6 @@
                     if(task.assistantId) teacherBusy[task.assistantId][d][p] = val;
                 };
 
-                // 1. Fixed Manual Allocation
                 if (task.isFixed) {
                     const d = parseInt(task.fixedDay);
                     const p = parseInt(task.fixedPeriod);
@@ -173,27 +179,19 @@
                     return false; 
                 }
 
-                // 2. Subject Lock
                 const forcedSlots = [];
-                for(let d=0; d<DAYS; d++) {
-                    for(let p=1; p<=PERIODS; p++) {
-                        if (subjectLocks[`${task.classId}-${d}-${p}`] === task.subjectId) forcedSlots.push({d, p});
-                    }
-                }
+                for(let d=0; d<DAYS; d++) for(let p=1; p<=PERIODS; p++) if (subjectLocks[`${task.classId}-${d}-${p}`] === task.subjectId) forcedSlots.push({d, p});
                 
-                let slotsToTry = [];
-                if (forcedSlots.length > 0) {
-                    slotsToTry = forcedSlots.filter(s => schedule[task.classId][s.d][s.p] === null);
-                    if(slotsToTry.length === 0) slotsToTry = getAllSlots(DAYS, PERIODS); 
-                } else {
-                    slotsToTry = getAllSlots(DAYS, PERIODS);
-                }
+                let slotsToTry = (forcedSlots.length > 0) ? forcedSlots.filter(s => schedule[task.classId][s.d][s.p] === null) : getAllSlots(DAYS, PERIODS);
+                if(forcedSlots.length > 0 && slotsToTry.length === 0) slotsToTry = getAllSlots(DAYS, PERIODS);
 
                 for (let {d, p} of slotsToTry) {
                     if (isValid(task, d, p)) {
                         toggle(d, p, true);
                         if (await solve(taskIndex + 1)) return true;
                         toggle(d, p, false);
+                    } else {
+                        stats.backtracks++; // Soft fail
                     }
                 }
                 return false;
@@ -339,17 +337,50 @@
                         <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
                             <Icon name="cpu" className="animate-spin text-blue-600"/> Generating...
                         </h2>
+                        
+                        {/* Progress Bar */}
                         <div className="w-full bg-gray-200 rounded-full h-4 mb-2 overflow-hidden">
-                            <div className="bg-blue-600 h-4 rounded-full transition-all duration-300" style={{ width: `${(progress.current / (progress.total || 1)) * 100}%` }}></div>
+                            <div 
+                                className="bg-blue-600 h-4 rounded-full transition-all duration-300" 
+                                style={{ width: `${(progress.current / (progress.total || 1)) * 100}%` }}
+                            ></div>
                         </div>
                         <div className="flex justify-between text-xs text-gray-500 mb-6 font-mono">
                             <span>Placed: {progress.current} / {progress.total}</span>
                             <span>Time: {progress.elapsed}s</span>
                         </div>
+
+                        {/* Console Log */}
+                        <div className="bg-slate-900 rounded p-4 font-mono text-xs h-48 overflow-y-auto border border-slate-700 shadow-inner">
+                            <div className="text-green-400 mb-1">$ start_scheduler_v3.1.exe</div>
+                            <div className="text-slate-400 mb-1">Loading {progress.total} tasks...</div>
+                            {progress.currentTaskName && (
+                                <div className="text-yellow-300 mb-1 animate-pulse">> Processing: {progress.currentTaskName}</div>
+                            )}
+                            
+                            <div className="mt-4 border-t border-slate-700 pt-2 grid grid-cols-2 gap-x-4">
+                                <div className="text-blue-300 font-bold mb-1 col-span-2">--- LIVE METRICS ---</div>
+                                
+                                <div className="text-red-400">Teacher Busy:</div>
+                                <div className="text-right text-red-200">{progress.stats?.teacherConflicts || 0}</div>
+
+                                <div className="text-red-400">Room Taken:</div>
+                                <div className="text-right text-red-200">{progress.stats?.roomConflicts || 0}</div>
+
+                                <div className="text-orange-400">Daily Limit:</div>
+                                <div className="text-right text-orange-200">{progress.stats?.dailyLimit || 0}</div>
+
+                                <div className="text-purple-400">Lock Clash:</div>
+                                <div className="text-right text-purple-200">{progress.stats?.lockConflicts || 0}</div>
+                                
+                                <div className="text-slate-500 mt-2 col-span-2 border-t border-slate-800 pt-1">
+                                    Total Checks: {progress.stats?.iterations?.toLocaleString() || 0}
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             );
-
             const FacultyTab = () => {
                 const [form, setForm] = useState({ name: '', short: '' });
                 const [editId, setEditId] = useState(null);
