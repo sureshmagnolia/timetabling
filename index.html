@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Timetable Architect V2.4 (Anti-Freeze)</title>
+    <title>Timetable Architect V2.5 (Anti-Freeze)</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     
@@ -597,7 +597,7 @@
             return (
                 <div className="min-h-screen pb-20">
                     <div className="bg-white border-b sticky top-0 z-10 px-4 h-16 flex items-center justify-between shadow-sm">
-                        <h1 className="font-bold text-xl flex items-center gap-2"><Icon name="calendar" /> Timetable Architect 2.4</h1>
+                        <h1 className="font-bold text-xl flex items-center gap-2"><Icon name="calendar" /> Timetable Architect 2.5</h1>
                         <div className="flex gap-4 items-center">
                             <span className={`text-xs font-bold text-green-600 transition-opacity ${saveStatus?'opacity-100':'opacity-0'}`}>Saved</span>
                             <div className="relative overflow-hidden"><button className="text-xs bg-slate-100 px-3 py-1 rounded hover:bg-slate-200 border flex gap-1 items-center"><Icon name="upload" className="w-3 h-3"/> Import XML</button><input type="file" ref={fileInputRef} onChange={handleFileUpload} className="absolute inset-0 opacity-0 cursor-pointer" accept=".xml"/></div>
