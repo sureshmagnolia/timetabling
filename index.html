@@ -345,23 +345,26 @@
             };
     
             const handleGenerate = async () => {
-                // 1. Run Pre-check
+                // --- NEW BLOCKING LOGIC START ---
+                // 1. Run the check before doing anything else
                 const conflicts = checkPreConditions();
+                
+                // 2. If conflicts exist, alert the user and STOP immediately
                 if (conflicts.length > 0) {
-                    alert("Cannot start generation. Please resolve these conflicts first:\n\n" + conflicts.join("\n"));
-                    return;
+                    alert("❌ Cannot start generation!\n\nPlease resolve the 'Impossible Conflicts' shown in the Workload tab first.\n\n" + conflicts.join("\n"));
+                    return; // This return statement prevents the loop from ever starting
                 }
+                // --- NEW BLOCKING LOGIC END ---
 
+                // If no conflicts, proceed as normal...
                 setIsGenerating(true);
-                // ... rest of existing code
                 setGenerationError(null);
                 setProgress({ current: 0, total: 0, stats: {}, elapsed: 0 });
                 
                 try {
-                    // We call the async version now
                     const result = await runBacktrackingAlgorithm(
                         workload, classes, subjects, faculty, constraints, 
-                        (prog) => setProgress(prog) // Update progress state
+                        (prog) => setProgress(prog)
                     );
                     setFinalSchedule(result);
                     setActiveTab('results');
